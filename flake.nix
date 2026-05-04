@@ -36,6 +36,9 @@
             docker
             docker-compose
 
+            # --- Secrets Management ---
+            doppler
+
             # --- Language Toolchain ---
             go
 
@@ -46,12 +49,6 @@
           ];
 
           shellHook = ''
-            if [ -f .env ]; then
-              set -a
-              . ./.env
-              set +a
-            fi
-
             if [ "''${OPENSTATICFISH_QUIET_SHELL:-}" != "1" ]; then
               echo "🐟 OpenStaticFish MicroServices Dev Shell"
               echo "-----------------------------------------"
@@ -101,6 +98,7 @@
               echo "  tilt down      - Stop dev environment"
               echo "  kubectl ...    - Interact with k8s cluster"
               echo "  docker ...     - Interact with containers"
+              echo "  doppler ...    - Manage project secrets"
               echo ""
             fi
           '';

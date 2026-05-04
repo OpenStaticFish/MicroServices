@@ -1,0 +1,3 @@
+setup:
+  - project: openstaticfish-microservices
+    config: dev

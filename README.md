@@ -16,6 +16,7 @@ All project CLI dependencies are provided by `flake.nix`, including:
 - `docker`
 - `helm`
 - `go`
+- `doppler`
 
 ## Quick Start
 
@@ -71,6 +72,7 @@ tilt up
 tilt down
 kubectl get pods
 docker ps
+doppler secrets
 ```
 
 ## Project Commands
@@ -227,11 +229,31 @@ The response includes:
 
 CDNs can hide the real origin. If a site is proxied through Cloudflare, the public DNS and IPs usually identify Cloudflare rather than the origin host. Origin detection is therefore best-effort and depends on leaked signals such as CSP entries, headers, HTML references, or provider-specific domains.
 
+## Secrets
+
+Runtime secrets are managed with Doppler in the `openstaticfish-microservices` project using the `dev` config.
+
+Initial setup after cloning:
+
+```bash
+doppler login
+doppler setup --no-interactive
+```
+
+Run commands with secrets injected:
+
+```bash
+doppler run -- your-command
+```
+
+Tilt uses Doppler to create the local Kubernetes `webshare-api` secret for the scraper service. Do not commit local `.env` files; `.env` and `.env.*` are ignored by Git.
+
 ## Layout
 
 ```text
 .
 ├── flake.nix
+├── doppler.yaml
 ├── Tiltfile
 ├── k8s/
 │   ├── scraper.yaml

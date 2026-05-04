@@ -193,12 +193,16 @@ func analyzeDNS(domain string, dnsInfo *DNSInfo, hosting *HostingInfo) error {
 		firstErr = err
 	}
 
-	if nsRecords, err := net.LookupNS(domain); err == nil {
+	nsDomain, nsRecords, err := lookupNameservers(domain)
+	if err == nil {
 		for _, ns := range nsRecords {
 			dnsInfo.Nameservers = append(dnsInfo.Nameservers, strings.TrimSuffix(strings.ToLower(ns.Host), "."))
 		}
 		dnsInfo.Nameservers = sortedUnique(dnsInfo.Nameservers)
 		dnsInfo.Provider = detectDNSProvider(dnsInfo.Nameservers)
+		if nsDomain != domain {
+			dnsInfo.Records["NS_DOMAIN"] = []string{nsDomain}
+		}
 	} else if firstErr == nil {
 		firstErr = err
 	}
@@ -217,6 +221,20 @@ func analyzeDNS(domain string, dnsInfo *DNSInfo, hosting *HostingInfo) error {
 	}
 
 	return firstErr
+}
+
+func lookupNameservers(domain string) (string, []*net.NS, error) {
+	labels := strings.Split(domain, ".")
+	var lastErr error
+	for i := 0; i <= len(labels)-2; i++ {
+		candidate := strings.Join(labels[i:], ".")
+		records, err := net.LookupNS(candidate)
+		if err == nil && len(records) > 0 {
+			return candidate, records, nil
+		}
+		lastErr = err
+	}
+	return "", nil, lastErr
 }
 
 func fetchSite(targetURL string) (*fetchedSite, error) {
@@ -287,8 +305,19 @@ func detectTechnologies(site *fetchedSite) TechnologyInfo {
 		tech.CMS = "Shopify"
 		detected["Shopify"] = true
 	}
+	if strings.Contains(lowerHTML, "/umbraco/") || strings.Contains(lowerHTML, "umb-client") || strings.Contains(lowerHTML, "umbracoforms") {
+		tech.CMS = "Umbraco"
+		tech.ProgrammingLanguage = ".NET"
+		detected["Umbraco"] = true
+		detected[".NET"] = true
+	}
 
-	if strings.Contains(lowerHTML, "__next_data__") || strings.Contains(lowerHTML, "/_next/static/") || site.Header.Get("X-Nextjs-Cache") != "" {
+	if strings.Contains(lowerHTML, "<!--blazor:") || strings.Contains(lowerHTML, "_framework/blazor") || strings.Contains(lowerHTML, "blazor.server.js") {
+		tech.Framework = "Blazor"
+		tech.ProgrammingLanguage = ".NET"
+		detected["Blazor"] = true
+		detected[".NET"] = true
+	} else if strings.Contains(lowerHTML, "__next_data__") || strings.Contains(lowerHTML, "/_next/static/") || site.Header.Get("X-Nextjs-Cache") != "" {
 		tech.Framework = "Next.js"
 		detected["Next.js"] = true
 		detected["React"] = true
@@ -309,6 +338,9 @@ func detectTechnologies(site *fetchedSite) TechnologyInfo {
 		tech.Framework = "SvelteKit"
 		detected["SvelteKit"] = true
 	}
+	if strings.Contains(lowerHTML, "_content/mudblazor/") || strings.Contains(lowerHTML, "mudblazor") {
+		detected["MudBlazor"] = true
+	}
 
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(string(site.Body)))
 	if err == nil {
@@ -323,7 +355,7 @@ func detectTechnologies(site *fetchedSite) TechnologyInfo {
 		})
 	}
 
-	for _, header := range []string{"CF-Ray", "X-Vercel-ID", "X-GitHub-Request-Id", "Fly-Request-Id"} {
+	for _, header := range []string{"CF-Ray", "X-Vercel-ID", "X-GitHub-Request-Id", "Fly-Request-Id", "X-Coolify"} {
 		if site.Header.Get(header) != "" {
 			detected[detectTechnologyFromHeader(header)] = true
 		}
@@ -405,6 +437,16 @@ func detectOriginProvider(site *fetchedSite) (string, []string) {
 		}
 		return "Pantheon", evidence
 	}
+	if strings.Contains(lowerHTML, "coolify") || strings.Contains(lowerHeaders, "coolify") {
+		var evidence []string
+		if strings.Contains(lowerHTML, "coolify") {
+			evidence = append(evidence, "html mentions coolify")
+		}
+		if strings.Contains(lowerHeaders, "coolify") {
+			evidence = append(evidence, "response headers mention coolify")
+		}
+		return "Coolify", evidence
+	}
 
 	return "", nil
 }
@@ -471,6 +513,8 @@ func detectTechnologyFromHeader(header string) string {
 		return "GitHub Pages"
 	case "Fly-Request-Id":
 		return "Fly.io"
+	case "X-Coolify":
+		return "Coolify"
 	default:
 		return header
 	}

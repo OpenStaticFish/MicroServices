@@ -78,11 +78,11 @@
             #   kubectl get pods
             #
             # View service logs:
-            #   kubectl logs -f deployment/hello-world
+            #   kubectl logs -f deployment/scraper
 
             # --- Docker Commands ---
             # Build images manually:
-            #   docker build -t hello-world ./services/hello-world
+            #   docker build -t scraper ./services/scraper
             #
             # List running containers:
             #   docker ps

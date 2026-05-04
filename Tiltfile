@@ -19,17 +19,17 @@
 # This creates/selects the supported local Kind context below.
 allow_k8s_contexts('kind-openstaticfish')
 
-# --- Hello World Service ---
+# --- Scraper Service ---
 # Builds the Docker image and deploys the manifest with live reload
-docker_build('hello-world', './services/hello-world')
+docker_build('scraper', './services/scraper')
 
-k8s_yaml('./k8s/hello-world.yaml')
+k8s_yaml('./k8s/scraper.yaml')
 
 # Watch source files for live reload
 k8s_resource(
-    workload='hello-world-deployment',
+    workload='scraper-deployment',
     port_forwards='8080:8080',
-    labels=['hello-world'],
+    labels=['scraper'],
 )
 
 # --- Local Resources ---
@@ -37,6 +37,6 @@ k8s_resource(
 local_resource(
     'health-check',
     cmd='curl -sf http://localhost:8080/health || echo "Service not ready"',
-    resource_deps=['hello-world-deployment'],
+    resource_deps=['scraper-deployment'],
     labels=['utility'],
 )

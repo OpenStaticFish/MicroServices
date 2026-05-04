@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# --- OpenStaticFish Scraper Test Script ---
+# Usage: ./scripts/test-scrape <url> [md|json]
+#   url          The URL to scrape
+#   format       Output format: md or json (default: json)
+
+SCRAPE_URL="${1:-}"
+FORMAT="${2:-json}"
+API_ENDPOINT="http://localhost:8080/scrape"
+
+if [[ -z "$SCRAPE_URL" ]]; then
+    echo "Error: URL is required"
+    echo "Usage: $0 <url> [md|json]"
+    echo "Example: $0 https://example.com md"
+    exit 1
+fi
+
+if [[ "$FORMAT" != "md" && "$FORMAT" != "json" ]]; then
+    echo "Error: format must be 'md' or 'json'"
+    exit 1
+fi
+
+echo "Scraping: $SCRAPE_URL"
+echo "Format: $FORMAT"
+echo "---"
+
+# Send request
+RESPONSE=$(curl -s -X POST "$API_ENDPOINT" \
+    -H "Content-Type: application/json" \
+    -d "{\"url\": \"$SCRAPE_URL\", \"format\": \"$FORMAT\"}")
+
+if [[ "$FORMAT" == "md" ]]; then
+    # Raw markdown output
+    echo "$RESPONSE"
+else
+    # Pretty-print JSON
+    if echo "$RESPONSE" | jq . > /dev/null 2>&1; then
+        echo "$RESPONSE" | jq .
+    else
+        echo "Error: Invalid response"
+        echo "$RESPONSE"
+        exit 1
+    fi
+fi

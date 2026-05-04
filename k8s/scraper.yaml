@@ -26,6 +26,24 @@ spec:
           env:
             - name: PORT
               value: "8080"
+            - name: WEBSHARE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: webshare-api
+                  key: api-key
+                  optional: true
+            - name: WEBSHARE_PROXY_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: webshare-api
+                  key: proxy-username
+                  optional: true
+            - name: WEBSHARE_PROXY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: webshare-api
+                  key: proxy-password
+                  optional: true
           resources:
             requests:
               memory: "64Mi"

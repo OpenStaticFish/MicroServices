@@ -46,8 +46,15 @@
           ];
 
           shellHook = ''
-            echo "🐟 OpenStaticFish MicroServices Dev Shell"
-            echo "-----------------------------------------"
+            if [ -f .env ]; then
+              set -a
+              . ./.env
+              set +a
+            fi
+
+            if [ "''${OPENSTATICFISH_QUIET_SHELL:-}" != "1" ]; then
+              echo "🐟 OpenStaticFish MicroServices Dev Shell"
+              echo "-----------------------------------------"
 
             # --- Tilt Commands ---
             # Create/select the local Kind cluster first:
@@ -87,14 +94,15 @@
             # List running containers:
             #   docker ps
 
-            echo ""
-            echo "Available commands:"
-            echo "  setup-kind     - Create/select local Kind cluster"
-            echo "  tilt up        - Start dev environment"
-            echo "  tilt down      - Stop dev environment"
-            echo "  kubectl ...    - Interact with k8s cluster"
-            echo "  docker ...     - Interact with containers"
-            echo ""
+              echo ""
+              echo "Available commands:"
+              echo "  setup-kind     - Create/select local Kind cluster"
+              echo "  tilt up        - Start dev environment"
+              echo "  tilt down      - Stop dev environment"
+              echo "  kubectl ...    - Interact with k8s cluster"
+              echo "  docker ...     - Interact with containers"
+              echo ""
+            fi
           '';
         };
 

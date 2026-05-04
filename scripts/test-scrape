@@ -2,18 +2,20 @@
 set -euo pipefail
 
 # --- OpenStaticFish Scraper Test Script ---
-# Usage: ./scripts/test-scrape <url> [md|json]
+# Usage: ./scripts/test-scrape <url> [md|json] [country]
 #   url          The URL to scrape
 #   format       Output format: md or json (default: json)
+#   country      Optional Webshare proxy country code (for example: us, gb, nl, pl)
 
 SCRAPE_URL="${1:-}"
 FORMAT="${2:-json}"
+EGRESS="${3:-}"
 API_ENDPOINT="http://localhost:8080/scrape"
 
 if [[ -z "$SCRAPE_URL" ]]; then
     echo "Error: URL is required"
-    echo "Usage: $0 <url> [md|json]"
-    echo "Example: $0 https://example.com md"
+    echo "Usage: $0 <url> [md|json] [country]"
+    echo "Example: $0 https://example.com md gb"
     exit 1
 fi
 
@@ -24,12 +26,40 @@ fi
 
 echo "Scraping: $SCRAPE_URL"
 echo "Format: $FORMAT"
+if [[ -n "$EGRESS" ]]; then
+    echo "Country: $EGRESS"
+    if [[ -f .env ]]; then
+        set -a
+        # shellcheck disable=SC1091
+        source .env
+        set +a
+    fi
+    if [[ -n "${WEBSHARE_API_KEY:-}" && -n "${WEBSHARE_PROXY_USERNAME:-}" && -n "${WEBSHARE_PROXY_PASSWORD:-}" ]]; then
+        if command -v kubectl >/dev/null 2>&1; then
+            kubectl create secret generic webshare-api \
+                --from-literal=api-key="$WEBSHARE_API_KEY" \
+                --from-literal=proxy-username="$WEBSHARE_PROXY_USERNAME" \
+                --from-literal=proxy-password="$WEBSHARE_PROXY_PASSWORD" \
+                --dry-run=client \
+                -o yaml | kubectl apply -f - >/dev/null
+            kubectl rollout restart deployment/scraper-deployment >/dev/null 2>&1 || true
+            kubectl rollout status deployment/scraper-deployment --timeout=120s >/dev/null 2>&1 || true
+        else
+            OPENSTATICFISH_QUIET_SHELL=1 nix --quiet --no-warn-dirty --option eval-cache false develop --command bash -c 'kubectl create secret generic webshare-api --from-literal=api-key="$WEBSHARE_API_KEY" --from-literal=proxy-username="$WEBSHARE_PROXY_USERNAME" --from-literal=proxy-password="$WEBSHARE_PROXY_PASSWORD" --dry-run=client -o yaml | kubectl apply -f - >/dev/null; kubectl rollout restart deployment/scraper-deployment >/dev/null 2>&1 || true; kubectl rollout status deployment/scraper-deployment --timeout=120s >/dev/null 2>&1 || true'
+        fi
+    fi
+fi
 echo "---"
+
+PAYLOAD="{\"url\": \"$SCRAPE_URL\", \"format\": \"$FORMAT\"}"
+if [[ -n "$EGRESS" ]]; then
+    PAYLOAD="{\"url\": \"$SCRAPE_URL\", \"format\": \"$FORMAT\", \"country\": \"$EGRESS\"}"
+fi
 
 # Send request
 RESPONSE=$(curl -s -X POST "$API_ENDPOINT" \
     -H "Content-Type: application/json" \
-    -d "{\"url\": \"$SCRAPE_URL\", \"format\": \"$FORMAT\"}")
+    -d "$PAYLOAD")
 
 if [[ "$FORMAT" == "md" ]]; then
     # Raw markdown output

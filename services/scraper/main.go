@@ -3,10 +3,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -15,8 +19,9 @@ import (
 
 // ScrapeRequest represents the incoming request body
 type ScrapeRequest struct {
-	URL    string `json:"url"`
-	Format string `json:"format"` // "md" or "json"
+	URL     string `json:"url"`
+	Format  string `json:"format"`  // "md" or "json"
+	Country string `json:"country"` // optional Webshare proxy country code, for example "us" or "gb"
 }
 
 // ScrapeResponse represents the response data
@@ -29,6 +34,7 @@ type ScrapeResponse struct {
 	Metadata    map[string]string `json:"metadata,omitempty"`
 	Links       []string          `json:"links,omitempty"`
 	Images      []string          `json:"images,omitempty"`
+	Country     string            `json:"country,omitempty"`
 	ScrapedAt   time.Time         `json:"scraped_at"`
 }
 
@@ -37,6 +43,31 @@ type ErrorResponse struct {
 	Error   string `json:"error"`
 	Details string `json:"details,omitempty"`
 }
+
+const webshareProxyCacheTTL = 5 * time.Minute
+
+type webshareProxy struct {
+	Username         string `json:"username"`
+	Password         string `json:"password"`
+	ProxyAddress     string `json:"proxy_address"`
+	Port             int    `json:"port"`
+	Valid            bool   `json:"valid"`
+	CountryCode      string `json:"country_code"`
+	CityName         string `json:"city_name"`
+	LastVerification string `json:"last_verification"`
+}
+
+type webshareProxyListResponse struct {
+	Count   int             `json:"count"`
+	Next    string          `json:"next"`
+	Results []webshareProxy `json:"results"`
+}
+
+var webshareCache = struct {
+	sync.Mutex
+	proxies   []webshareProxy
+	fetchedAt time.Time
+}{}
 
 func main() {
 	port := os.Getenv("PORT")
@@ -82,8 +113,14 @@ func handleScrape(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	country := normalizeCountryCode(req.Country)
+	if err := validateCountry(country); err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid country", err.Error())
+		return
+	}
+
 	req.URL = normalizeURL(req.URL)
-	result, err := scrapeURL(req.URL, format)
+	result, err := scrapeURL(req.URL, format, country)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Scraping failed", err.Error())
 		return
@@ -98,7 +135,23 @@ func handleScrape(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func scrapeURL(url, format string) (*ScrapeResponse, error) {
+func scrapeURL(url, format string, country string) (*ScrapeResponse, error) {
+	if country != "" {
+		proxy, err := selectWebshareProxy(country)
+		if err != nil {
+			return nil, err
+		}
+		transport, err := webshareProxyTransport(proxy)
+		if err != nil {
+			return nil, err
+		}
+		return scrapeURLWithTransport(url, format, country, transport)
+	}
+
+	return scrapeURLWithTransport(url, format, country, nil)
+}
+
+func scrapeURLWithTransport(url, format string, country string, transport *http.Transport) (*ScrapeResponse, error) {
 	var htmlContent string
 	var title string
 	var description string
@@ -107,8 +160,13 @@ func scrapeURL(url, format string) (*ScrapeResponse, error) {
 	metadata := make(map[string]string)
 
 	c := colly.NewCollector(
-		colly.UserAgent("OpenStaticFish-Scraper/1.0"),
+		colly.UserAgent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
 	)
+	c.SetRequestTimeout(30 * time.Second)
+
+	if transport != nil {
+		c.WithTransport(transport)
+	}
 
 	c.OnResponse(func(r *colly.Response) {
 		htmlContent = string(r.Body)
@@ -173,6 +231,7 @@ func scrapeURL(url, format string) (*ScrapeResponse, error) {
 		Metadata:    metadata,
 		Links:       deduplicate(links),
 		Images:      deduplicate(images),
+		Country:     country,
 		ScrapedAt:   time.Now().UTC(),
 	}, nil
 }
@@ -191,6 +250,159 @@ func normalizeURL(rawURL string) string {
 	return "https://" + rawURL
 }
 
+func validateCountry(country string) error {
+	if country == "" {
+		return nil
+	}
+	if len(country) != 2 || country[0] < 'a' || country[0] > 'z' || country[1] < 'a' || country[1] > 'z' {
+		return fmt.Errorf("country must be a two-letter country code, for example us, gb, nl, pl")
+	}
+	return nil
+}
+
+func normalizeCountryCode(country string) string {
+	country = strings.ToLower(strings.TrimSpace(country))
+	if country == "uk" {
+		return "gb"
+	}
+	return country
+}
+
+func webshareProxyTransport(proxy webshareProxy) (*http.Transport, error) {
+	username := proxy.Username
+	password := proxy.Password
+	if username == "" {
+		username = os.Getenv("WEBSHARE_PROXY_USERNAME")
+	}
+	if password == "" {
+		password = os.Getenv("WEBSHARE_PROXY_PASSWORD")
+	}
+	if username == "" || password == "" {
+		return nil, fmt.Errorf("Webshare proxy credentials are missing for selected proxy")
+	}
+
+	proxyURL := &url.URL{
+		Scheme: "http",
+		Host:   fmt.Sprintf("%s:%d", proxy.ProxyAddress, proxy.Port),
+		User:   url.UserPassword(username, password),
+	}
+	if _, err := url.Parse(proxyURL.String()); err != nil {
+		return nil, fmt.Errorf("failed to configure Webshare proxy: %w", err)
+	}
+
+	return &http.Transport{
+		Proxy: http.ProxyURL(proxyURL),
+	}, nil
+}
+
+func selectWebshareProxy(country string) (webshareProxy, error) {
+	proxies, err := getWebshareProxies(false)
+	if err != nil {
+		return webshareProxy{}, err
+	}
+	if proxy, ok := findWebshareProxy(proxies, country); ok {
+		return proxy, nil
+	}
+
+	proxies, err = getWebshareProxies(true)
+	if err != nil {
+		return webshareProxy{}, err
+	}
+	if proxy, ok := findWebshareProxy(proxies, country); ok {
+		return proxy, nil
+	}
+
+	return webshareProxy{}, fmt.Errorf("no valid Webshare proxy available for country %q; available countries: %s", country, strings.Join(availableWebshareCountries(proxies), ", "))
+}
+
+func findWebshareProxy(proxies []webshareProxy, country string) (webshareProxy, bool) {
+	for _, proxy := range proxies {
+		if proxy.Valid && strings.EqualFold(proxy.CountryCode, country) {
+			return proxy, true
+		}
+	}
+	return webshareProxy{}, false
+}
+
+func getWebshareProxies(forceRefresh bool) ([]webshareProxy, error) {
+	webshareCache.Lock()
+	defer webshareCache.Unlock()
+
+	if !forceRefresh && len(webshareCache.proxies) > 0 && time.Since(webshareCache.fetchedAt) < webshareProxyCacheTTL {
+		return webshareCache.proxies, nil
+	}
+
+	proxies, err := fetchWebshareProxies()
+	if err != nil {
+		return nil, err
+	}
+	webshareCache.proxies = proxies
+	webshareCache.fetchedAt = time.Now()
+	return proxies, nil
+}
+
+func fetchWebshareProxies() ([]webshareProxy, error) {
+	apiKey := os.Getenv("WEBSHARE_API_KEY")
+	if apiKey == "" {
+		return nil, fmt.Errorf("WEBSHARE_API_KEY is required when country is set")
+	}
+
+	var proxies []webshareProxy
+	listURL := "https://proxy.webshare.io/api/v2/proxy/list/?mode=direct&page=1&page_size=100"
+	client := &http.Client{Timeout: 20 * time.Second}
+
+	for listURL != "" {
+		req, err := http.NewRequest(http.MethodGet, listURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Webshare request: %w", err)
+		}
+		req.Header.Set("Authorization", "Token "+apiKey)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch Webshare proxies: %w", err)
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("failed to read Webshare response: %w", readErr)
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("Webshare proxy list request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+
+		var result webshareProxyListResponse
+		if err := json.Unmarshal(body, &result); err != nil {
+			return nil, fmt.Errorf("failed to parse Webshare proxy list: %w", err)
+		}
+		proxies = append(proxies, result.Results...)
+		listURL = result.Next
+	}
+
+	return proxies, nil
+}
+
+func availableWebshareCountries(proxies []webshareProxy) []string {
+	seen := make(map[string]bool)
+	var countries []string
+	for _, proxy := range proxies {
+		if !proxy.Valid || proxy.CountryCode == "" {
+			continue
+		}
+		country := strings.ToLower(proxy.CountryCode)
+		if seen[country] {
+			continue
+		}
+		seen[country] = true
+		countries = append(countries, country)
+	}
+	if len(countries) == 0 {
+		return []string{"none"}
+	}
+	sort.Strings(countries)
+	return countries
+}
+
 func convertToMarkdown(html string, title string, description string) string {
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
 	if err != nil {
@@ -201,20 +413,20 @@ func convertToMarkdown(html string, title string, description string) string {
 	doc.Find("script, style").Remove()
 
 	var md strings.Builder
-	
+
 	// Add title as H1 if present
 	if title != "" {
 		md.WriteString("# ")
 		md.WriteString(title)
 		md.WriteString("\n\n")
 	}
-	
+
 	// Add description if present
 	if description != "" {
 		md.WriteString(description)
 		md.WriteString("\n\n")
 	}
-	
+
 	// Process the body
 	doc.Find("body").Each(func(i int, s *goquery.Selection) {
 		processNode(&md, s)
@@ -226,13 +438,13 @@ func convertToMarkdown(html string, title string, description string) string {
 func processNode(md *strings.Builder, s *goquery.Selection) {
 	s.Children().Each(func(i int, child *goquery.Selection) {
 		nodeType := goquery.NodeName(child)
-		
+
 		// Add spacing before block elements (except first child)
 		isBlock := isBlockElement(nodeType)
 		if isBlock && i > 0 {
 			md.WriteString("\n")
 		}
-		
+
 		switch nodeType {
 		case "h1":
 			md.WriteString("\n# ")
@@ -519,8 +731,8 @@ func deduplicate(slice []string) []string {
 }
 
 func respondWithError(w http.ResponseWriter, status int, err string, details string) {
-	w.WriteHeader(status)
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(ErrorResponse{
 		Error:   err,
 		Details: details,

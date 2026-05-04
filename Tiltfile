@@ -25,10 +25,17 @@ docker_build('scraper', './services/scraper')
 
 k8s_yaml('./k8s/scraper.yaml')
 
+local_resource(
+    'webshare-secret',
+    cmd='set -a; [ ! -f .env ] || . ./.env; set +a; if [ -n "$WEBSHARE_API_KEY" ] && [ -n "$WEBSHARE_PROXY_USERNAME" ] && [ -n "$WEBSHARE_PROXY_PASSWORD" ]; then kubectl create secret generic webshare-api --from-literal=api-key="$WEBSHARE_API_KEY" --from-literal=proxy-username="$WEBSHARE_PROXY_USERNAME" --from-literal=proxy-password="$WEBSHARE_PROXY_PASSWORD" --dry-run=client -o yaml | kubectl apply -f -; else echo "Webshare runtime config missing; country scraping unavailable"; fi',
+    labels=['utility'],
+)
+
 # Watch source files for live reload
 k8s_resource(
     workload='scraper-deployment',
     port_forwards='8080:8080',
+    resource_deps=['webshare-secret'],
     labels=['scraper'],
 )
 

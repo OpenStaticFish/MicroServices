@@ -22,8 +22,10 @@ allow_k8s_contexts('kind-openstaticfish')
 # --- Scraper Service ---
 # Builds the Docker image and deploys the manifest with live reload
 docker_build('scraper', './services/scraper')
+docker_build('site-analyzer', './services/site-analyzer')
 
 k8s_yaml('./k8s/scraper.yaml')
+k8s_yaml('./k8s/site-analyzer.yaml')
 
 local_resource(
     'webshare-secret',
@@ -39,11 +41,24 @@ k8s_resource(
     labels=['scraper'],
 )
 
+k8s_resource(
+    workload='site-analyzer-deployment',
+    port_forwards='8090:8090',
+    labels=['site-analyzer'],
+)
+
 # --- Local Resources ---
 # Run a simple health check as a local resource
 local_resource(
     'health-check',
     cmd='curl -sf http://localhost:8080/health || echo "Service not ready"',
     resource_deps=['scraper-deployment'],
+    labels=['utility'],
+)
+
+local_resource(
+    'site-analyzer-health-check',
+    cmd='curl -sf http://localhost:8090/health || echo "Site analyzer not ready"',
+    resource_deps=['site-analyzer-deployment'],
     labels=['utility'],
 )

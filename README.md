@@ -1,6 +1,6 @@
 # OpenStaticFish MicroServices
 
-Basic local Kubernetes development setup using Nix, Kind, Tilt, Docker, and a small Go hello-world service.
+Basic local Kubernetes development setup using Nix, Kind, Tilt, Docker, and small Go microservices.
 
 ## Requirements
 
@@ -37,10 +37,16 @@ Open the Tilt UI:
 http://localhost:10350
 ```
 
-Test the hello-world service:
+Test the scraper service:
 
 ```bash
-curl http://localhost:8080
+curl http://localhost:8080/health
+```
+
+Analyze a site once Tilt is running:
+
+```bash
+scripts/analyze-site adaptive.co.uk
 ```
 
 Stop Tilt resources:
@@ -154,10 +160,10 @@ kubectl get pods
 List running pods.
 
 ```bash
-kubectl logs -f deployment/hello-world-deployment
+kubectl logs -f deployment/site-analyzer-deployment
 ```
 
-Stream logs from the hello-world deployment.
+Stream logs from the site analyzer deployment.
 
 ```bash
 kubectl get svc
@@ -174,10 +180,52 @@ docker ps
 List running containers, including Kind node containers.
 
 ```bash
-docker build -t hello-world ./services/hello-world
+docker build -t site-analyzer ./services/site-analyzer
 ```
 
-Build the hello-world image manually outside Tilt.
+Build the site analyzer image manually outside Tilt.
+
+## Site Analyzer
+
+The `site-analyzer` service accepts a URL and returns JSON describing visible site infrastructure and technology signals.
+
+Endpoint:
+
+```text
+POST http://localhost:8090/analyze
+```
+
+Request:
+
+```json
+{
+  "url": "https://example.com"
+}
+```
+
+Wrapper script:
+
+```bash
+scripts/analyze-site https://example.com
+```
+
+Override the endpoint if needed:
+
+```bash
+scripts/analyze-site --endpoint http://localhost:8090/analyze example.com
+```
+
+The response includes:
+
+- `hosting.provider`: the visible edge/provider inferred from DNS, reverse DNS, and HTTP headers
+- `hosting.cdn`: CDN detected from headers, for example Cloudflare, Fastly, CloudFront, or Akamai
+- `hosting.origin_provider`: best-effort origin/platform inference, for example Pantheon when `pantheonsite.io` hints are exposed
+- `hosting.origin_evidence`: specific signals used for origin inference
+- `dns`: nameservers and common DNS records
+- `technologies`: CMS/framework/server signals such as Drupal, WordPress, React, Next.js, or Cloudflare
+- `security`: TLS/HSTS/security-header information
+
+CDNs can hide the real origin. If a site is proxied through Cloudflare, the public DNS and IPs usually identify Cloudflare rather than the origin host. Origin detection is therefore best-effort and depends on leaked signals such as CSP entries, headers, HTML references, or provider-specific domains.
 
 ## Layout
 
@@ -186,11 +234,17 @@ Build the hello-world image manually outside Tilt.
 ├── flake.nix
 ├── Tiltfile
 ├── k8s/
-│   └── hello-world.yaml
+│   ├── scraper.yaml
+│   └── site-analyzer.yaml
 ├── scripts/
+│   ├── analyze-site
 │   └── setup-kind
 └── services/
-    └── hello-world/
+    ├── scraper/
+    │   ├── Dockerfile
+    │   ├── go.mod
+    │   └── main.go
+    └── site-analyzer/
         ├── Dockerfile
         ├── go.mod
         └── main.go

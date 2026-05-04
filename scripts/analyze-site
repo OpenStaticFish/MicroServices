@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+endpoint="${SITE_ANALYZER_ENDPOINT:-http://localhost:8090/analyze}"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/analyze-site [--endpoint URL] <site-url>
+
+Examples:
+  scripts/analyze-site https://example.com
+  scripts/analyze-site --endpoint http://localhost:8090/analyze example.com
+  SITE_ANALYZER_ENDPOINT=http://localhost:8090/analyze scripts/analyze-site example.com
+USAGE
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --endpoint)
+      if [ "$#" -lt 2 ]; then
+        echo "Missing value for --endpoint" >&2
+        usage >&2
+        exit 1
+      fi
+      endpoint="$2"
+      shift 2
+      ;;
+    --endpoint=*)
+      endpoint="${1#--endpoint=}"
+      shift
+      ;;
+    --*)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [ "$#" -ne 1 ]; then
+  usage >&2
+  exit 1
+fi
+
+site_url="$1"
+payload=$(jq -cn --arg url "$site_url" '{url: $url}' 2>/dev/null || printf '{"url":"%s"}' "$site_url")
+
+response=$(curl -fsS \
+  -H 'Content-Type: application/json' \
+  -X POST \
+  --data "$payload" \
+  "$endpoint")
+
+if command -v jq >/dev/null 2>&1; then
+  jq . <<<"$response"
+else
+  printf '%s\n' "$response"
+fi

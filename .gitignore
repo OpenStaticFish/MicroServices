@@ -1,0 +1,31 @@
+# Local environment
+.direnv/
+.envrc
+.env
+.env.*
+!.env.example
+
+# Nix build outputs
+result
+result-*
+
+# Tilt local state
+.tiltbuild/
+.tiltignore.local
+
+# Kubernetes local config dumps
+kubeconfig
+*.kubeconfig
+
+# Go build/test artifacts
+bin/
+dist/
+*.test
+*.out
+coverage.out
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp

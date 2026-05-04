@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cluster_name="openstaticfish"
+
+if ! docker info >/dev/null 2>&1; then
+  echo "Docker is not running or is not reachable. Start Docker, then rerun setup-kind."
+  exit 1
+fi
+
+if kind get clusters | grep -qx "$cluster_name"; then
+  echo "Kind cluster '$cluster_name' already exists."
+else
+  kind create cluster --name "$cluster_name"
+fi
+
+kubectl config use-context "kind-$cluster_name"
+kubectl cluster-info

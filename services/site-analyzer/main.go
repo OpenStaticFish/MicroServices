@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -9,8 +11,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -80,29 +86,260 @@ type fetchedSite struct {
 	TLS        bool
 }
 
-func main() {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8090"
-	}
-
-	http.HandleFunc("/analyze", handleAnalyze)
-	http.HandleFunc("/health", handleHealth)
-
-	log.Printf("site-analyzer listening on :%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+type config struct {
+	port                  string
+	maxConcurrentAnalyses int
+	analysisTimeout       time.Duration
+	fetchTimeout          time.Duration
+	maxRequestBytes       int64
+	maxResponseBytes      int64
+	readHeaderTimeout     time.Duration
+	readTimeout           time.Duration
+	writeTimeout          time.Duration
+	idleTimeout           time.Duration
+	shutdownTimeout       time.Duration
+	maxIdleConns          int
+	maxIdleConnsPerHost   int
+	responseHeaderTimeout time.Duration
+	tlsHandshakeTimeout   time.Duration
+	expectContinueTimeout time.Duration
+	idleConnTimeout       time.Duration
 }
 
-func handleHealth(w http.ResponseWriter, r *http.Request) {
+type app struct {
+	config    config
+	client    *http.Client
+	semaphore chan struct{}
+	metrics   *metrics
+}
+
+type metrics struct {
+	requestsTotal        atomic.Int64
+	analyzeRequestsTotal atomic.Int64
+	analyzeRejectedTotal atomic.Int64
+	analyzeErrorsTotal   atomic.Int64
+	analyzeDurationCount atomic.Int64
+	analyzeDurationNanos atomic.Int64
+	activeAnalyses       atomic.Int64
+}
+
+var errUnsafeTarget = errors.New("target resolves to a private or otherwise unsafe address")
+
+func main() {
+	cfg := loadConfig()
+	application := newApp(cfg)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/analyze", application.handleAnalyze)
+	mux.HandleFunc("/health", application.handleHealth)
+	mux.HandleFunc("/ready", application.handleReady)
+	mux.HandleFunc("/metrics", application.handleMetrics)
+
+	server := &http.Server{
+		Addr:              ":" + cfg.port,
+		Handler:           mux,
+		ReadHeaderTimeout: cfg.readHeaderTimeout,
+		ReadTimeout:       cfg.readTimeout,
+		WriteTimeout:      cfg.writeTimeout,
+		IdleTimeout:       cfg.idleTimeout,
+		MaxHeaderBytes:    16 * 1024,
+	}
+
+	serverErrors := make(chan error, 1)
+	go func() {
+		log.Printf("site-analyzer listening on :%s max_concurrent_analyses=%d analysis_timeout=%s", cfg.port, cfg.maxConcurrentAnalyses, cfg.analysisTimeout)
+		serverErrors <- server.ListenAndServe()
+	}()
+
+	shutdownSignals := make(chan os.Signal, 1)
+	signal.Notify(shutdownSignals, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case err := <-serverErrors:
+		if !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal(err)
+		}
+	case signal := <-shutdownSignals:
+		log.Printf("received %s, shutting down", signal)
+		ctx, cancel := context.WithTimeout(context.Background(), cfg.shutdownTimeout)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			log.Printf("graceful shutdown failed: %v", err)
+			if closeErr := server.Close(); closeErr != nil {
+				log.Printf("forced shutdown failed: %v", closeErr)
+			}
+		}
+	}
+}
+
+func newApp(cfg config) *app {
+	application := &app{
+		config:    cfg,
+		semaphore: make(chan struct{}, cfg.maxConcurrentAnalyses),
+		metrics:   &metrics{},
+	}
+
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           application.safeDialContext,
+		MaxIdleConns:          cfg.maxIdleConns,
+		MaxIdleConnsPerHost:   cfg.maxIdleConnsPerHost,
+		IdleConnTimeout:       cfg.idleConnTimeout,
+		TLSHandshakeTimeout:   cfg.tlsHandshakeTimeout,
+		ResponseHeaderTimeout: cfg.responseHeaderTimeout,
+		ExpectContinueTimeout: cfg.expectContinueTimeout,
+	}
+	application.client = &http.Client{
+		Timeout:   cfg.fetchTimeout,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("stopped after 5 redirects")
+			}
+			return validateTargetURL(req.URL)
+		},
+	}
+
+	return application
+}
+
+func loadConfig() config {
+	analysisTimeout := durationEnv("ANALYSIS_TIMEOUT", 15*time.Second)
+	fetchTimeout := durationEnv("FETCH_TIMEOUT", 10*time.Second)
+	writeTimeout := durationEnv("WRITE_TIMEOUT", analysisTimeout+5*time.Second)
+	if writeTimeout <= analysisTimeout {
+		writeTimeout = analysisTimeout + 5*time.Second
+	}
+
+	return config{
+		port:                  stringEnv("PORT", "8090"),
+		maxConcurrentAnalyses: intEnv("MAX_CONCURRENT_ANALYSES", 20),
+		analysisTimeout:       analysisTimeout,
+		fetchTimeout:          fetchTimeout,
+		maxRequestBytes:       int64Env("MAX_REQUEST_BYTES", 4*1024),
+		maxResponseBytes:      int64Env("MAX_RESPONSE_BYTES", 2*1024*1024),
+		readHeaderTimeout:     durationEnv("READ_HEADER_TIMEOUT", 2*time.Second),
+		readTimeout:           durationEnv("READ_TIMEOUT", 5*time.Second),
+		writeTimeout:          writeTimeout,
+		idleTimeout:           durationEnv("IDLE_TIMEOUT", 60*time.Second),
+		shutdownTimeout:       durationEnv("SHUTDOWN_TIMEOUT", 25*time.Second),
+		maxIdleConns:          intEnv("MAX_IDLE_CONNS", 200),
+		maxIdleConnsPerHost:   intEnv("MAX_IDLE_CONNS_PER_HOST", 20),
+		responseHeaderTimeout: durationEnv("RESPONSE_HEADER_TIMEOUT", 5*time.Second),
+		tlsHandshakeTimeout:   durationEnv("TLS_HANDSHAKE_TIMEOUT", 5*time.Second),
+		expectContinueTimeout: durationEnv("EXPECT_CONTINUE_TIMEOUT", time.Second),
+		idleConnTimeout:       durationEnv("IDLE_CONN_TIMEOUT", 90*time.Second),
+	}
+}
+
+func stringEnv(name string, fallback string) string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func intEnv(name string, fallback int) int {
+	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv(name)))
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
+}
+
+func int64Env(name string, fallback int64) int64 {
+	value, err := strconv.ParseInt(strings.TrimSpace(os.Getenv(name)), 10, 64)
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
+}
+
+func durationEnv(name string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration <= 0 {
+		return fallback
+	}
+	return duration
+}
+
+func (a *app) handleHealth(w http.ResponseWriter, r *http.Request) {
+	a.metrics.requestsTotal.Add(1)
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, "ok")
 }
 
-func handleAnalyze(w http.ResponseWriter, r *http.Request) {
+func (a *app) handleReady(w http.ResponseWriter, r *http.Request) {
+	a.metrics.requestsTotal.Add(1)
+	if int(a.metrics.activeAnalyses.Load()) >= a.config.maxConcurrentAnalyses {
+		respondWithError(w, http.StatusServiceUnavailable, "Service saturated", "maximum concurrent analyses are already running")
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, "ready")
+}
+
+func (a *app) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	a.metrics.requestsTotal.Add(1)
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+
+	durationSeconds := float64(a.metrics.analyzeDurationNanos.Load()) / float64(time.Second)
+	fmt.Fprintf(w, "# HELP site_analyzer_requests_total Total HTTP requests received.\n")
+	fmt.Fprintf(w, "# TYPE site_analyzer_requests_total counter\n")
+	fmt.Fprintf(w, "site_analyzer_requests_total %d\n", a.metrics.requestsTotal.Load())
+	fmt.Fprintf(w, "# HELP site_analyzer_analyze_requests_total Total analyze requests received.\n")
+	fmt.Fprintf(w, "# TYPE site_analyzer_analyze_requests_total counter\n")
+	fmt.Fprintf(w, "site_analyzer_analyze_requests_total %d\n", a.metrics.analyzeRequestsTotal.Load())
+	fmt.Fprintf(w, "# HELP site_analyzer_analyze_rejected_total Analyze requests rejected because the pod is saturated.\n")
+	fmt.Fprintf(w, "# TYPE site_analyzer_analyze_rejected_total counter\n")
+	fmt.Fprintf(w, "site_analyzer_analyze_rejected_total %d\n", a.metrics.analyzeRejectedTotal.Load())
+	fmt.Fprintf(w, "# HELP site_analyzer_analyze_errors_total Analyze requests that failed before producing a response.\n")
+	fmt.Fprintf(w, "# TYPE site_analyzer_analyze_errors_total counter\n")
+	fmt.Fprintf(w, "site_analyzer_analyze_errors_total %d\n", a.metrics.analyzeErrorsTotal.Load())
+	fmt.Fprintf(w, "# HELP site_analyzer_active_analyses Current number of in-flight analyses.\n")
+	fmt.Fprintf(w, "# TYPE site_analyzer_active_analyses gauge\n")
+	fmt.Fprintf(w, "site_analyzer_active_analyses %d\n", a.metrics.activeAnalyses.Load())
+	fmt.Fprintf(w, "# HELP site_analyzer_max_concurrent_analyses Configured maximum in-flight analyses per pod.\n")
+	fmt.Fprintf(w, "# TYPE site_analyzer_max_concurrent_analyses gauge\n")
+	fmt.Fprintf(w, "site_analyzer_max_concurrent_analyses %d\n", a.config.maxConcurrentAnalyses)
+	fmt.Fprintf(w, "# HELP site_analyzer_analyze_duration_seconds Total analyze request duration.\n")
+	fmt.Fprintf(w, "# TYPE site_analyzer_analyze_duration_seconds summary\n")
+	fmt.Fprintf(w, "site_analyzer_analyze_duration_seconds_sum %.6f\n", durationSeconds)
+	fmt.Fprintf(w, "site_analyzer_analyze_duration_seconds_count %d\n", a.metrics.analyzeDurationCount.Load())
+}
+
+func (a *app) handleAnalyze(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	a.metrics.requestsTotal.Add(1)
+	a.metrics.analyzeRequestsTotal.Add(1)
+	defer func() {
+		a.metrics.analyzeDurationCount.Add(1)
+		a.metrics.analyzeDurationNanos.Add(time.Since(start).Nanoseconds())
+	}()
+
 	if r.Method != http.MethodPost {
 		respondWithError(w, http.StatusMethodNotAllowed, "Method not allowed", "Only POST requests are supported")
 		return
 	}
+	select {
+	case a.semaphore <- struct{}{}:
+		a.metrics.activeAnalyses.Add(1)
+		defer func() {
+			<-a.semaphore
+			a.metrics.activeAnalyses.Add(-1)
+		}()
+	default:
+		a.metrics.analyzeRejectedTotal.Add(1)
+		respondWithError(w, http.StatusTooManyRequests, "Too many requests", "maximum concurrent analyses are already running")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, a.config.maxRequestBytes)
 
 	var req AnalyzeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -114,8 +351,20 @@ func handleAnalyze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := analyzeSite(req.URL)
+	ctx, cancel := context.WithTimeout(r.Context(), a.config.analysisTimeout)
+	defer cancel()
+
+	result, err := a.analyzeSite(ctx, req.URL)
 	if err != nil {
+		a.metrics.analyzeErrorsTotal.Add(1)
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			respondWithError(w, http.StatusGatewayTimeout, "Analysis timed out", err.Error())
+			return
+		}
+		if errors.Is(err, errUnsafeTarget) || strings.Contains(err.Error(), "url") {
+			respondWithError(w, http.StatusBadRequest, "Invalid target", err.Error())
+			return
+		}
 		respondWithError(w, http.StatusInternalServerError, "Analysis failed", err.Error())
 		return
 	}
@@ -124,11 +373,14 @@ func handleAnalyze(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(result)
 }
 
-func analyzeSite(rawURL string) (*AnalyzeResponse, error) {
+func (a *app) analyzeSite(ctx context.Context, rawURL string) (*AnalyzeResponse, error) {
 	normalizedURL := normalizeURL(rawURL)
 	parsed, err := url.Parse(normalizedURL)
 	if err != nil || parsed.Hostname() == "" {
 		return nil, fmt.Errorf("invalid url")
+	}
+	if err := validateTargetURL(parsed); err != nil {
+		return nil, err
 	}
 
 	domain := strings.ToLower(parsed.Hostname())
@@ -148,11 +400,14 @@ func analyzeSite(rawURL string) (*AnalyzeResponse, error) {
 	}
 
 	var warnings []string
-	if err := analyzeDNS(domain, &response.DNS, &response.Hosting); err != nil {
+	if err := analyzeDNS(ctx, domain, &response.DNS, &response.Hosting); err != nil {
+		if errors.Is(err, errUnsafeTarget) {
+			return nil, err
+		}
 		warnings = append(warnings, "dns lookup failed: "+err.Error())
 	}
 
-	fetched, err := fetchSite(normalizedURL)
+	fetched, err := a.fetchSite(ctx, normalizedURL)
 	if err != nil {
 		warnings = append(warnings, "http fetch failed: "+err.Error())
 	} else {
@@ -175,15 +430,22 @@ func analyzeSite(rawURL string) (*AnalyzeResponse, error) {
 	return response, nil
 }
 
-func analyzeDNS(domain string, dnsInfo *DNSInfo, hosting *HostingInfo) error {
+func analyzeDNS(ctx context.Context, domain string, dnsInfo *DNSInfo, hosting *HostingInfo) error {
 	var firstErr error
 
-	if ips, err := net.LookupHost(domain); err == nil {
+	resolver := net.DefaultResolver
+	if ips, err := resolver.LookupHost(ctx, domain); err == nil {
+		for _, value := range ips {
+			ip := net.ParseIP(value)
+			if !isSafeIP(ip) {
+				return errUnsafeTarget
+			}
+		}
 		hosting.IPAddresses = sortedUnique(ips)
 		dnsInfo.Records["A"] = filterIPs(ips, false)
 		dnsInfo.Records["AAAA"] = filterIPs(ips, true)
 		for _, ip := range ips {
-			names, err := net.LookupAddr(ip)
+			names, err := resolver.LookupAddr(ctx, ip)
 			if err == nil {
 				hosting.ReverseDNS = append(hosting.ReverseDNS, names...)
 			}
@@ -193,7 +455,7 @@ func analyzeDNS(domain string, dnsInfo *DNSInfo, hosting *HostingInfo) error {
 		firstErr = err
 	}
 
-	nsDomain, nsRecords, err := lookupNameservers(domain)
+	nsDomain, nsRecords, err := lookupNameservers(ctx, domain)
 	if err == nil {
 		for _, ns := range nsRecords {
 			dnsInfo.Nameservers = append(dnsInfo.Nameservers, strings.TrimSuffix(strings.ToLower(ns.Host), "."))
@@ -207,7 +469,7 @@ func analyzeDNS(domain string, dnsInfo *DNSInfo, hosting *HostingInfo) error {
 		firstErr = err
 	}
 
-	if mxRecords, err := net.LookupMX(domain); err == nil {
+	if mxRecords, err := resolver.LookupMX(ctx, domain); err == nil {
 		for _, mx := range mxRecords {
 			dnsInfo.Records["MX"] = append(dnsInfo.Records["MX"], strings.TrimSuffix(strings.ToLower(mx.Host), "."))
 		}
@@ -223,12 +485,12 @@ func analyzeDNS(domain string, dnsInfo *DNSInfo, hosting *HostingInfo) error {
 	return firstErr
 }
 
-func lookupNameservers(domain string) (string, []*net.NS, error) {
+func lookupNameservers(ctx context.Context, domain string) (string, []*net.NS, error) {
 	labels := strings.Split(domain, ".")
 	var lastErr error
 	for i := 0; i <= len(labels)-2; i++ {
 		candidate := strings.Join(labels[i:], ".")
-		records, err := net.LookupNS(candidate)
+		records, err := net.DefaultResolver.LookupNS(ctx, candidate)
 		if err == nil && len(records) > 0 {
 			return candidate, records, nil
 		}
@@ -237,22 +499,21 @@ func lookupNameservers(domain string) (string, []*net.NS, error) {
 	return "", nil, lastErr
 }
 
-func fetchSite(targetURL string) (*fetchedSite, error) {
-	client := &http.Client{Timeout: 20 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, targetURL, nil)
+func (a *app) fetchSite(ctx context.Context, targetURL string) (*fetchedSite, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 
-	resp, err := client.Do(req)
+	resp, err := a.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, a.config.maxResponseBytes))
 	if err != nil {
 		return nil, err
 	}
@@ -264,6 +525,74 @@ func fetchSite(targetURL string) (*fetchedSite, error) {
 		Body:       body,
 		TLS:        resp.TLS != nil,
 	}, nil
+}
+
+func (a *app) safeDialContext(ctx context.Context, network string, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	if host == "" {
+		return nil, errors.New("missing host")
+	}
+
+	resolver := net.DefaultResolver
+	addresses, err := resolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	if len(addresses) == 0 {
+		return nil, errors.New("host resolved to no addresses")
+	}
+
+	var lastErr error
+	dialer := &net.Dialer{Timeout: a.config.fetchTimeout, KeepAlive: 30 * time.Second}
+	for _, resolved := range addresses {
+		ip := resolved.IP
+		if !isSafeIP(ip) {
+			return nil, errUnsafeTarget
+		}
+		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, errUnsafeTarget
+}
+
+func validateTargetURL(targetURL *url.URL) error {
+	if targetURL == nil || targetURL.Hostname() == "" {
+		return errors.New("invalid url")
+	}
+	if targetURL.User != nil {
+		return errors.New("url credentials are not supported")
+	}
+	switch strings.ToLower(targetURL.Scheme) {
+	case "http", "https":
+	default:
+		return errors.New("only http and https urls are supported")
+	}
+	if ip := net.ParseIP(targetURL.Hostname()); ip != nil && !isSafeIP(ip) {
+		return errUnsafeTarget
+	}
+	return nil
+}
+
+func isSafeIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return false
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		return !(ip4[0] == 169 && ip4[1] == 254)
+	}
+	return true
 }
 
 func analyzeSecurity(site *fetchedSite) SecurityInfo {

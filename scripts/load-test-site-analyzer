@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+endpoint="${SITE_ANALYZER_ENDPOINT:-http://localhost:8090/analyze}"
+site_url="https://example.com"
+requests="100"
+concurrency="10"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/load-test-site-analyzer [--endpoint URL] [--url SITE_URL] [--requests N] [--concurrency N]
+
+Examples:
+  scripts/load-test-site-analyzer --url https://example.com --requests 100 --concurrency 10
+  scripts/load-test-site-analyzer --endpoint http://site-analyzer.example.com/analyze --url example.com --requests 1000 --concurrency 50
+USAGE
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --endpoint)
+      endpoint="$2"
+      shift 2
+      ;;
+    --endpoint=*)
+      endpoint="${1#--endpoint=}"
+      shift
+      ;;
+    --url)
+      site_url="$2"
+      shift 2
+      ;;
+    --url=*)
+      site_url="${1#--url=}"
+      shift
+      ;;
+    --requests)
+      requests="$2"
+      shift 2
+      ;;
+    --requests=*)
+      requests="${1#--requests=}"
+      shift
+      ;;
+    --concurrency)
+      concurrency="$2"
+      shift 2
+      ;;
+    --concurrency=*)
+      concurrency="${1#--concurrency=}"
+      shift
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+payload=$(jq -cn --arg url "$site_url" '{url: $url}' 2>/dev/null || printf '{"url":"%s"}' "$site_url")
+results_file=$(mktemp)
+start_epoch=$(date +%s%N)
+
+cleanup() {
+  rm -f "$results_file"
+}
+trap cleanup EXIT
+
+export endpoint payload results_file
+
+seq "$requests" | xargs -n 1 -P "$concurrency" sh -c '
+  result=$(curl -sS -o /dev/null -w "%{http_code} %{time_total}" -H "Content-Type: application/json" -X POST --data "$payload" "$endpoint" || printf "000 0")
+  printf "%s\n" "$result" >>"$results_file"
+'
+
+end_epoch=$(date +%s%N)
+elapsed_ns=$((end_epoch - start_epoch))
+elapsed=$(awk -v ns="$elapsed_ns" 'BEGIN { printf "%.3f", ns / 1000000000 }')
+rps=$(awk -v requests="$requests" -v ns="$elapsed_ns" 'BEGIN { printf "%.2f", requests / (ns / 1000000000) }')
+
+echo "endpoint: $endpoint"
+echo "url: $site_url"
+echo "requests: $requests"
+echo "concurrency: $concurrency"
+echo "elapsed_seconds: $elapsed"
+echo "requests_per_second: $rps"
+echo "status_codes:"
+cut -d ' ' -f 1 "$results_file" | sort | uniq -c
+echo "latency_seconds:"
+awk '{ count++; sum += $2; if ($2 > max) max = $2 } END { if (count > 0) printf "avg %.3f\nmax %.3f\n", sum / count, max }' "$results_file"

@@ -13,11 +13,17 @@ spec:
   selector:
     matchLabels:
       app: site-analyzer
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   template:
     metadata:
       labels:
         app: site-analyzer
     spec:
+      terminationGracePeriodSeconds: 30
       containers:
         - name: site-analyzer
           image: site-analyzer
@@ -26,25 +32,53 @@ spec:
           env:
             - name: PORT
               value: "8090"
+            - name: MAX_CONCURRENT_ANALYSES
+              value: "20"
+            - name: ANALYSIS_TIMEOUT
+              value: "15s"
+            - name: FETCH_TIMEOUT
+              value: "10s"
+            - name: MAX_REQUEST_BYTES
+              value: "4096"
+            - name: MAX_RESPONSE_BYTES
+              value: "2097152"
+            - name: READ_HEADER_TIMEOUT
+              value: "2s"
+            - name: READ_TIMEOUT
+              value: "5s"
+            - name: WRITE_TIMEOUT
+              value: "20s"
+            - name: IDLE_TIMEOUT
+              value: "60s"
+            - name: SHUTDOWN_TIMEOUT
+              value: "25s"
+            - name: MAX_IDLE_CONNS
+              value: "200"
+            - name: MAX_IDLE_CONNS_PER_HOST
+              value: "20"
           resources:
             requests:
-              memory: "64Mi"
-              cpu: "100m"
+              memory: "128Mi"
+              cpu: "250m"
             limits:
-              memory: "256Mi"
-              cpu: "500m"
+              memory: "512Mi"
+              cpu: "1000m"
           livenessProbe:
             httpGet:
               path: /health
               port: 8090
             initialDelaySeconds: 2
             periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /health
+              path: /ready
               port: 8090
             initialDelaySeconds: 2
-            periodSeconds: 5
+            periodSeconds: 3
+            timeoutSeconds: 1
+            failureThreshold: 2
 ---
 apiVersion: v1
 kind: Service

@@ -217,6 +217,39 @@ Override the endpoint if needed:
 scripts/analyze-site --endpoint http://localhost:8090/analyze example.com
 ```
 
+Load-test a running analyzer with fixed request and concurrency levels:
+
+```bash
+scripts/load-test-site-analyzer --url https://example.com --requests 100 --concurrency 10
+```
+
+Single-instance benchmark from the local Kind deployment, targeting `https://example.com` with `1000` requests per run and `MAX_CONCURRENT_ANALYSES=20`:
+
+| Concurrency | HTTP 200 | HTTP 429 | Throughput | Avg latency | Max latency |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 5 | 1000 | 0 | 136.23 req/s | 0.029s | 0.068s |
+| 10 | 1000 | 0 | 248.62 req/s | 0.032s | 0.047s |
+| 15 | 1000 | 0 | 346.15 req/s | 0.034s | 0.052s |
+| 20 | 1000 | 0 | 391.14 req/s | 0.039s | 0.061s |
+| 25 | 759 | 241 | 535.11 req/s | 0.035s | 0.074s |
+| 30 | 688 | 312 | 590.35 req/s | 0.036s | 0.292s |
+
+Current guidance: treat `20` concurrent in-flight analyses as the safe per-instance ceiling. Above that, the service intentionally sheds load with `429` instead of queueing unbounded work.
+
+Operational endpoints:
+
+- `GET /health`: cheap liveness check
+- `GET /ready`: readiness check; returns unavailable when the pod is saturated
+- `GET /metrics`: Prometheus-style counters and gauges
+
+Runtime controls:
+
+- `MAX_CONCURRENT_ANALYSES`: maximum in-flight analyses per pod before returning `429`
+- `ANALYSIS_TIMEOUT`: whole-analysis deadline, default `15s`
+- `FETCH_TIMEOUT`: outbound HTTP fetch deadline, default `10s`
+- `MAX_REQUEST_BYTES`: request body cap, default `4096`
+- `MAX_RESPONSE_BYTES`: fetched response body cap, default `2097152`
+
 The response includes:
 
 - `hosting.provider`: the visible edge/provider inferred from DNS, reverse DNS, and HTTP headers

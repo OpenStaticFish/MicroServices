@@ -3,7 +3,6 @@
 .envrc
 .env
 .env.*
-!.env.example
 
 # Nix build outputs
 result

@@ -31,8 +31,15 @@ k8s_yaml('./k8s/lightpanda-cdp.yaml')
 k8s_yaml('./k8s/lightpanda-mcp.yaml')
 
 local_resource(
-    'webshare-secret',
-    cmd='bash ./scripts/apply-webshare-secret',
+    'doppler-operator',
+    cmd='kubectl apply -f https://github.com/DopplerHQ/kubernetes-operator/releases/latest/download/recommended.yaml && kubectl wait --for=condition=Established crd/dopplersecrets.secrets.doppler.com --timeout=60s',
+    labels=['utility'],
+)
+
+local_resource(
+    'doppler-webshare-secret',
+    cmd='kubectl apply -f ./k8s/doppler-webshare-secret.yaml',
+    resource_deps=['doppler-operator'],
     labels=['utility'],
 )
 
@@ -40,7 +47,6 @@ local_resource(
 k8s_resource(
     workload='scraper-deployment',
     port_forwards='8080:8080',
-    resource_deps=['webshare-secret'],
     labels=['scraper'],
 )
 

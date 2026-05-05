@@ -47,5 +47,5 @@
 - **No default registry**: Tilt loads images directly into Kind. Do not add `default_registry('localhost:5000')` unless you also create a local registry.
 - **Docker must be running** before `setup-kind` or Tilt image builds.
 - **Production manifests** live in `deploy/prod/`. On `main` pushes, CI builds GHCR images (`ghcr.io/openstaticfish/microservices/{site-analyzer,scraper,lightpanda-mcp}`) and commits updated `newTag` to `kustomization.yaml`.
-- **Secrets**: managed by Doppler (`openstaticfish-microservices` / `dev` config). `scripts/apply-webshare-secret` reads from Doppler; if Doppler is not authenticated, it prints a warning and skips (non-fatal).
+- **Secrets**: managed by the Doppler Kubernetes Operator. `k8s/doppler-webshare-secret.yaml` syncs Doppler project `openstaticfish-microservices` / config `dev` into Kubernetes secret `webshare-api`. The cluster needs a `doppler-token-secret` in namespace `doppler-operator-system`; do not commit token values.
 - **No tests, lint, or CI checks exist** in this repo yet — do not invent commands that don't exist.

@@ -20,16 +20,10 @@ All project CLI dependencies are provided by `flake.nix`, including:
 
 ## Quick Start
 
-Create or select the local Kind cluster:
+Nuke any stale state, create a fresh Kind cluster, and start Tilt:
 
 ```bash
-nix run .#setup-kind
-```
-
-Start Tilt:
-
-```bash
-nix run .#tilt -- up
+nix run .#tilt-up
 ```
 
 Open the Tilt UI:
@@ -57,10 +51,10 @@ curl http://localhost:9222/json/version
 curl http://localhost:8000/healthz
 ```
 
-Stop Tilt resources:
+Nuke Tilt + Kind cluster:
 
 ```bash
-nix run .#tilt -- down
+nix run .#tilt-down
 ```
 
 ## Dev Shell
@@ -74,12 +68,13 @@ nix develop
 Inside the shell:
 
 ```bash
-setup-kind
-tilt up
-tilt down
+tilt-up            # nuke stale state, recreate Kind cluster, start Tilt
+tilt-down          # nuke Tilt + Kind cluster
+tilt up            # start Tilt (assumes cluster exists)
+tilt down           # tear down Tilt resources only
 kubectl get pods
 docker ps
-doppler secrets
+doppler secrets     # list Doppler project secrets
 ```
 
 ## Project Commands
@@ -102,13 +97,25 @@ Create the `openstaticfish` Kind cluster if needed, select the `kind-openstaticf
 nix run .#tilt -- up
 ```
 
-Run Tilt with the required runtime tools available, including `kind`, `kubectl`, and `docker`.
+Start Tilt with the required runtime tools, including `kind`, `kubectl`, and `docker`. Assumes the Kind cluster already exists and the context is set.
+
+```bash
+nix run .#tilt-down
+```
+
+Nuke Tilt + Kind cluster: kills any stale Tilt process on port 10350, then deletes the Kind cluster.
+
+```bash
+nix run .#tilt-up
+```
+
+Nuke stale state, create a fresh Kind cluster, set the kube context, then start Tilt. Use this after switching worktrees or crashes.
 
 ```bash
 nix run .#tilt -- down
 ```
 
-Tear down Kubernetes resources managed by Tilt.
+Tear down only the Tilt-managed Kubernetes resources without deleting the cluster.
 
 ```bash
 nix flake show
@@ -388,7 +395,20 @@ Run commands with secrets injected:
 doppler run -- your-command
 ```
 
-Tilt uses Doppler to create the local Kubernetes `webshare-api` secret for the scraper service. Do not commit local `.env` files; `.env` and `.env.*` are ignored by Git.
+Tilt installs the Doppler Kubernetes Operator and applies `k8s/doppler-webshare-secret.yaml` to sync Doppler project `openstaticfish-microservices` config `dev` into the local Kubernetes `webshare-api` secret for the scraper service.
+
+The operator needs a Kubernetes token secret in the `doppler-operator-system` namespace. Create it once after the Kind cluster exists:
+
+```bash
+kubectl create namespace doppler-operator-system --dry-run=client -o yaml | kubectl apply -f -
+kubectl create secret generic doppler-token-secret \
+  --namespace doppler-operator-system \
+  --from-literal=serviceToken="$(doppler configure get token --plain)" \
+  --dry-run=client \
+  -o yaml | kubectl apply -f -
+```
+
+Do not commit local `.env` files or token values; `.env` and `.env.*` are ignored by Git.
 
 ## Production Deployment
 
@@ -426,11 +446,11 @@ Runtime secrets, including the scraper Webshare configuration, stay in Doppler p
 ├── k8s/
 │   ├── lightpanda-cdp.yaml
 │   ├── lightpanda-mcp.yaml
+│   ├── doppler-webshare-secret.yaml
 │   ├── scraper.yaml
 │   └── site-analyzer.yaml
 ├── scripts/
 │   ├── analyze-site
-│   ├── apply-webshare-secret
 │   ├── load-test-site-analyzer
 │   ├── screenshot-lightpanda-page
 │   ├── setup-kind
@@ -464,10 +484,10 @@ git add -A
 
 The Tiltfile allows only the `kind-openstaticfish` Kubernetes context to avoid accidentally deploying to another cluster.
 
-If Tilt reports that it cannot connect to Kubernetes, rerun:
+If Tilt reports that it cannot connect to Kubernetes, run:
 
 ```bash
-nix run .#setup-kind
+nix run .#tilt-up
 ```
 
-Then restart Tilt.
+This nukes stale state, recreates the Kind cluster, and starts Tilt.

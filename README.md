@@ -281,6 +281,21 @@ doppler run -- your-command
 
 Tilt uses Doppler to create the local Kubernetes `webshare-api` secret for the scraper service. Do not commit local `.env` files; `.env` and `.env.*` are ignored by Git.
 
+## Production Images
+
+Tilt is local-development only in this repo. It continues to build local images named `site-analyzer` and `scraper` for the Kind/Tilt workflow.
+
+Production deployment is owned by the HetznerTerra GitOps repo. This repo publishes container images only; it is not the source of truth for production Kubernetes deployment manifests.
+
+On pushes to `main`, GitHub Actions builds and pushes these GHCR images:
+
+- `ghcr.io/openstaticfish/microservices/site-analyzer:main`
+- `ghcr.io/openstaticfish/microservices/site-analyzer:<git-sha>`
+- `ghcr.io/openstaticfish/microservices/scraper:main`
+- `ghcr.io/openstaticfish/microservices/scraper:<git-sha>`
+
+HetznerTerra should reference immutable `<git-sha>` tags for production deployments. Runtime secrets, including the scraper Webshare configuration, must be supplied by the deployment environment and are not baked into images.
+
 ## Layout
 
 ```text

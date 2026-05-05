@@ -16,6 +16,8 @@
 - `nix run .#setup-kind` — creates/selects the `kind-openstaticfish` Kind cluster.
 - `nix run .#tilt -- up` — deploys all services with live reload.
 - `nix run .#tilt -- down` — tears down Tilt-managed resources.
+- `nix run .#tilt-up` — nukes stale Tilt + Kind state, creates/reuses Kind cluster, sets kube context, then `tilt up`. Use this after switching worktrees or crashes.
+- `nix run .#tilt-down` — kills any Tilt process on port 10350 and deletes the Kind cluster.
 - `nix develop` — enters the dev shell with all deps (`tilt`, `kubectl`, `docker`, `go`, `jq`, `websocat`, etc.).
 - `nix flake show` — sanity check after editing `flake.nix`.
 

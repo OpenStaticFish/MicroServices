@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cluster_name="openstaticfish"
+
+echo "Nuking Tilt + Kind..."
+
+# 1. Kill whatever is holding port 10350. Do not call `tilt down` here:
+# it can hang when the kube context points at a dead Kind API server.
+pid=$(ss -tlnp 'sport = :10350' 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -1 || true)
+if [ -n "$pid" ]; then
+  echo "Killing process on port 10350: $pid"
+  kill "$pid" 2>/dev/null || true
+fi
+
+# 2. Delete the Kind cluster. This nukes all Tilt-managed resources too.
+echo "Deleting Kind cluster '$cluster_name'..."
+kind delete cluster --name "$cluster_name" 2>/dev/null || true
+
+echo "Nuked."

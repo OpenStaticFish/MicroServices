@@ -24,6 +24,20 @@
             exec tilt "$@"
           '';
         };
+        tilt-up = pkgs.writeShellApplication {
+          name = "tilt-up";
+          runtimeInputs = with pkgs; [ docker kind kubectl tilt iproute2 ];
+          text = ''
+            exec bash ${./scripts/tilt-up} "$@"
+          '';
+        };
+        tilt-down = pkgs.writeShellApplication {
+          name = "tilt-down";
+          runtimeInputs = with pkgs; [ docker kind kubectl tilt iproute2 ];
+          text = ''
+            exec bash ${./scripts/tilt-down} "$@"
+          '';
+        };
       in
       {
         devShells.default = pkgs.mkShell {
@@ -55,16 +69,15 @@
               echo "-----------------------------------------"
 
             # --- Tilt Commands ---
-            # Create/select the local Kind cluster first:
-            #   setup-kind
-            #   nix run .#setup-kind
+            # Nuke stale state + full restart (recommended after worktree switch):
+            #   nix run .#tilt-up
             #
-            # Start the development environment:
+            # Nuke everything (Tilt + Kind cluster):
+            #   nix run .#tilt-down
+            #
+            # Start Tilt (assumes Kind cluster + context already set up):
             #   tilt up
             #   nix run .#tilt -- up
-            #
-            # Tear down resources:
-            #   tilt down
             #
             # View Tilt UI:
             #   tilt ui
@@ -96,6 +109,8 @@
               echo "Available commands:"
               echo "  setup-kind     - Create/select local Kind cluster"
               echo "  tilt up        - Start dev environment"
+              echo "  tilt-up        - Nuke stale state, create Kind cluster, tilt up"
+              echo "  tilt-down      - Nuke Tilt + Kind cluster"
               echo "  tilt down      - Stop dev environment"
               echo "  kubectl ...    - Interact with k8s cluster"
               echo "  docker ...     - Interact with containers"
@@ -108,6 +123,7 @@
         # --- Command wrappers ---
         # Run with: nix run .#setup-kind
         # Run with: nix run .#tilt -- up
+        # Run with: nix run .#tilt-up
         apps = {
           setup-kind = {
             type = "app";
@@ -117,6 +133,16 @@
           tilt = {
             type = "app";
             program = "${tilt-dev}/bin/tilt-dev";
+          };
+
+          tilt-up = {
+            type = "app";
+            program = "${tilt-up}/bin/tilt-up";
+          };
+
+          tilt-down = {
+            type = "app";
+            program = "${tilt-down}/bin/tilt-down";
           };
         };
       }

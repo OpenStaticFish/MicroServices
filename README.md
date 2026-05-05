@@ -412,22 +412,118 @@ Do not commit local `.env` files or token values; `.env` and `.env.*` are ignore
 
 ## Production Deployment
 
-Tilt is local-development only in this repo. It continues to build local images named `site-analyzer` and `scraper` for the Kind/Tilt workflow.
+Tilt is local-development only. HetznerTerra owns the K3s cluster and platform plumbing; this repo owns application source code, production images, production Kubernetes manifests, app routes, and app ExternalSecrets.
 
-Production Kubernetes manifests live in `deploy/prod` in this repo. HetznerTerra owns the cluster and subscribes Flux to this repository; adding or changing MicroServices workloads should happen here, not in the infrastructure repo.
+Production Kubernetes manifests live in `deploy/prod`. Flux applies that path from a Gitea pull mirror of this GitHub repo:
+
+```text
+ssh://git@64.176.189.59:2222/OpenStaticFish/MicroServices.git
+```
+
+The public Tailnet hostname is:
+
+```text
+apps.silverside-gopher.ts.net
+```
 
 On pushes to `main`, GitHub Actions builds and pushes these GHCR images:
 
-- `ghcr.io/openstaticfish/microservices/site-analyzer:main`
 - `ghcr.io/openstaticfish/microservices/site-analyzer:<git-sha>`
-- `ghcr.io/openstaticfish/microservices/scraper:main`
 - `ghcr.io/openstaticfish/microservices/scraper:<git-sha>`
-- `ghcr.io/openstaticfish/microservices/lightpanda-mcp:main`
 - `ghcr.io/openstaticfish/microservices/lightpanda-mcp:<git-sha>`
 
-After pushing images, CI updates `deploy/prod/kustomization.yaml` to the immutable `<git-sha>` tag and commits that change back to `main`. Flux then applies the production manifests from this repo.
+The workflow also pushes `:main` as a convenience tag, but production uses the immutable `<git-sha>` tags in `deploy/prod/kustomization.yaml`. The prebuilt `lightpanda-cdp` image is pinned by digest in its Deployment. After app images are pushed, CI updates `deploy/prod/kustomization.yaml` to the new SHA and commits the tag update back to `main` with `[skip ci]`. The Gitea mirror pulls the update, then Flux reconciles `./deploy/prod` into the `microservices` namespace.
 
-Runtime secrets, including the scraper Webshare configuration, stay in Doppler project `openstaticfish-microservices` config `dev`. They are exposed to the cluster through External Secrets and are not baked into images or stored in HetznerTerra.
+Runtime secrets stay in Doppler project `openstaticfish-microservices`, config `dev`. Production manifests represent them only as External Secrets using `ClusterSecretStore/doppler-openstaticfish-microservices`. Do not put runtime secrets in GitHub, Gitea, images, or manifests.
+
+### Adding a Service
+
+1. Add the service source under `services/<service-name>/` with a `Dockerfile`.
+2. Add one Kubernetes object per file under `deploy/prod/`, using kebab-case filenames:
+   `deploy/prod/<service-name>-deployment.yaml`, `deploy/prod/<service-name>-service.yaml`, and optionally `deploy/prod/<service-name>-hpa.yaml`.
+3. Configure the Deployment with health/readiness probes, resource requests/limits, and an image in `ghcr.io/openstaticfish/microservices/<service-name>:<sha>`.
+4. Add those files to `deploy/prod/kustomization.yaml`.
+5. Add an `images:` entry in `deploy/prod/kustomization.yaml` for `ghcr.io/openstaticfish/microservices/<service-name>`.
+6. Add the service to `.github/workflows/publish-images.yml` under `matrix.service` and update the tag-update step for the new image.
+7. Add a route in `deploy/prod/ingressroute-microservices.yaml` for ``Host(`apps.silverside-gopher.ts.net`) && PathPrefix(`/service-name`)``.
+8. Add the prefix to `deploy/prod/traefik-middleware-strip-prefix.yaml` if the app should receive paths without the route prefix.
+9. Update local Tilt files only if the service should also run in local Kind development.
+
+### Adding Runtime Secrets
+
+1. Add the secret value in Doppler project `openstaticfish-microservices`, config `dev`.
+2. Add or update an ExternalSecret in `deploy/prod/` using this store:
+
+```yaml
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: example-secret
+  namespace: microservices
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: doppler-openstaticfish-microservices
+    kind: ClusterSecretStore
+  target:
+    name: example-secret
+    creationPolicy: Owner
+  data:
+    - secretKey: app-key
+      remoteRef:
+        key: DOPPLER_SECRET_NAME
+```
+
+3. Reference the generated Kubernetes Secret from the Deployment with `valueFrom.secretKeyRef`.
+4. Add the ExternalSecret file to `deploy/prod/kustomization.yaml`.
+
+Never commit secret values, Doppler service tokens, GHCR tokens, or generated Kubernetes Secret manifests.
+
+### Production Verification
+
+Validate manifests locally before pushing:
+
+```bash
+kubectl kustomize deploy/prod
+git diff --check
+```
+
+If `actionlint` is installed, validate the workflow:
+
+```bash
+actionlint .github/workflows/publish-images.yml
+```
+
+Useful cluster checks after Flux reconciles:
+
+```bash
+kubectl -n microservices get deploy,svc,hpa,pods
+kubectl -n microservices get ingressroute,middleware
+kubectl -n microservices get externalsecret,secret
+kubectl -n microservices describe externalsecret webshare-api
+kubectl -n microservices rollout status deployment/scraper
+kubectl -n microservices rollout status deployment/site-analyzer
+kubectl -n microservices rollout status deployment/lightpanda-mcp
+kubectl -n microservices rollout status deployment/lightpanda-cdp
+```
+
+Useful Flux checks from the cluster context:
+
+```bash
+flux get sources git -A
+flux get kustomizations -A
+flux reconcile source git <source-name> -n <flux-namespace>
+flux reconcile kustomization <kustomization-name> -n <flux-namespace>
+```
+
+Application health checks through the Tailnet route:
+
+```bash
+curl http://apps.silverside-gopher.ts.net/scraper/health
+curl http://apps.silverside-gopher.ts.net/site-analyzer/health
+curl http://apps.silverside-gopher.ts.net/lightpanda-cdp/json/version
+curl http://apps.silverside-gopher.ts.net/lightpanda-mcp/healthz
+```
 
 ## Layout
 
@@ -439,10 +535,22 @@ Runtime secrets, including the scraper Webshare configuration, stay in Doppler p
 ├── deploy/
 │   └── prod/
 │       ├── kustomization.yaml
+│       ├── ingressroute-microservices.yaml
+│       ├── namespace.yaml
 │       ├── lightpanda-cdp-deployment.yaml
+│       ├── lightpanda-cdp-hpa.yaml
+│       ├── lightpanda-cdp-service.yaml
 │       ├── lightpanda-mcp-deployment.yaml
+│       ├── lightpanda-mcp-hpa.yaml
+│       ├── lightpanda-mcp-service.yaml
 │       ├── scraper-deployment.yaml
-│       └── site-analyzer-deployment.yaml
+│       ├── scraper-hpa.yaml
+│       ├── scraper-service.yaml
+│       ├── site-analyzer-deployment.yaml
+│       ├── site-analyzer-hpa.yaml
+│       ├── site-analyzer-service.yaml
+│       ├── traefik-middleware-strip-prefix.yaml
+│       └── webshare-api-externalsecret.yaml
 ├── k8s/
 │   ├── lightpanda-cdp.yaml
 │   ├── lightpanda-mcp.yaml

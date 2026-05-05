@@ -20,8 +20,6 @@ spec:
       labels:
         app: site-analyzer
     spec:
-      imagePullSecrets:
-        - name: ghcr-pull-secret
       terminationGracePeriodSeconds: 30
       containers:
         - name: site-analyzer

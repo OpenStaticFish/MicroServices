@@ -15,8 +15,6 @@ spec:
       labels:
         app: scraper
     spec:
-      imagePullSecrets:
-        - name: ghcr-pull-secret
       containers:
         - name: scraper
           image: ghcr.io/openstaticfish/microservices/scraper:4c6b1dc752feab5ef4c52f40d5c97a85ec59bcba

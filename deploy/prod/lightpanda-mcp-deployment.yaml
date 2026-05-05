@@ -20,8 +20,6 @@ spec:
       labels:
         app: lightpanda-mcp
     spec:
-      imagePullSecrets:
-        - name: ghcr-pull-secret
       terminationGracePeriodSeconds: 30
       containers:
         - name: lightpanda-mcp

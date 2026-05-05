@@ -23,10 +23,10 @@ resources:
   - ingressroute-microservices.yaml
 images:
   - name: ghcr.io/openstaticfish/microservices/site-analyzer
-    newTag: 8ffe23ab7af39a86203638d16211da19447bcc4d
+    newTag: fc2cf40fe1cc35af07d670ea195def5a122ac3a3
   - name: ghcr.io/openstaticfish/microservices/scraper
-    newTag: 8ffe23ab7af39a86203638d16211da19447bcc4d
+    newTag: fc2cf40fe1cc35af07d670ea195def5a122ac3a3
   - name: ghcr.io/openstaticfish/microservices/lightpanda-cdp
-    newTag: 8ffe23ab7af39a86203638d16211da19447bcc4d
+    newTag: fc2cf40fe1cc35af07d670ea195def5a122ac3a3
   - name: ghcr.io/openstaticfish/microservices/lightpanda-mcp
-    newTag: 8ffe23ab7af39a86203638d16211da19447bcc4d
+    newTag: fc2cf40fe1cc35af07d670ea195def5a122ac3a3

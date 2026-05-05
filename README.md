@@ -430,9 +430,10 @@ On pushes to `main`, GitHub Actions builds and pushes these GHCR images:
 
 - `ghcr.io/openstaticfish/microservices/site-analyzer:<git-sha>`
 - `ghcr.io/openstaticfish/microservices/scraper:<git-sha>`
+- `ghcr.io/openstaticfish/microservices/lightpanda-cdp:<git-sha>`
 - `ghcr.io/openstaticfish/microservices/lightpanda-mcp:<git-sha>`
 
-The workflow also pushes `:main` as a convenience tag, but production uses the immutable `<git-sha>` tags in `deploy/prod/kustomization.yaml`. The prebuilt `lightpanda-cdp` image is pinned by digest in its Deployment. After app images are pushed, CI updates `deploy/prod/kustomization.yaml` to the new SHA and commits the tag update back to `main` with `[skip ci]`. The Gitea mirror pulls the update, then Flux reconciles `./deploy/prod` into the `microservices` namespace.
+The workflow also pushes `:main` as a convenience tag, but production uses the immutable `<git-sha>` tags in `deploy/prod/kustomization.yaml`. After app images are pushed, CI updates `deploy/prod/kustomization.yaml` to the new SHA and commits the tag update back to `main` with `[skip ci]`. The Gitea mirror pulls the update, then Flux reconciles `./deploy/prod` into the `microservices` namespace.
 
 Runtime secrets stay in Doppler project `openstaticfish-microservices`, config `dev`. Production manifests represent them only as External Secrets using `ClusterSecretStore/doppler-openstaticfish-microservices`. Do not put runtime secrets in GitHub, Gitea, images, or manifests.
 
@@ -569,6 +570,8 @@ curl http://apps.silverside-gopher.ts.net/lightpanda-mcp/healthz
     │   ├── go.mod
     │   └── main.go
     ├── lightpanda-mcp/
+    │   └── Dockerfile
+    ├── lightpanda-cdp/
     │   └── Dockerfile
     └── site-analyzer/
         ├── Dockerfile

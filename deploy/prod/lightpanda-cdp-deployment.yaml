@@ -23,7 +23,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: lightpanda-cdp
-          image: lightpanda/browser@sha256:7b05b1c2f618fad9ed77786132f47ef71091875528bc46e6b3852b75c361cb05
+          image: ghcr.io/openstaticfish/microservices/lightpanda-cdp:8ffe23ab7af39a86203638d16211da19447bcc4d
           args:
             - /bin/lightpanda
             - serve

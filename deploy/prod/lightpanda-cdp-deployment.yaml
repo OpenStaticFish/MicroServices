@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lightpanda-cdp
+  namespace: microservices
+  labels:
+    app: lightpanda-cdp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: lightpanda-cdp
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: lightpanda-cdp
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: lightpanda-cdp
+          image: lightpanda/browser:nightly
+          args:
+            - /bin/lightpanda
+            - serve
+            - --host
+            - 0.0.0.0
+            - --port
+            - "9222"
+            - --log-level
+            - warn
+          ports:
+            - containerPort: 9222
+          env:
+            - name: LIGHTPANDA_DISABLE_TELEMETRY
+              value: "true"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /json/version
+              port: 9222
+            initialDelaySeconds: 2
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /json/version
+              port: 9222
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2

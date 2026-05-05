@@ -1,0 +1,71 @@
+# --- Lightpanda MCP Kubernetes Manifests ---
+# Managed by Tilt - run `tilt up` to deploy
+# Tear down with: `tilt down`
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lightpanda-mcp-deployment
+  labels:
+    app: lightpanda-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lightpanda-mcp
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: lightpanda-mcp
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: lightpanda-mcp
+          image: lightpanda-mcp
+          ports:
+            - containerPort: 8000
+          env:
+            - name: LIGHTPANDA_DISABLE_TELEMETRY
+              value: "true"
+          resources:
+            requests:
+              memory: "192Mi"
+              cpu: "250m"
+            limits:
+              memory: "768Mi"
+              cpu: "1000m"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lightpanda-mcp-service
+spec:
+  selector:
+    app: lightpanda-mcp
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP

@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lightpanda-mcp
+  namespace: microservices
+  labels:
+    app: lightpanda-mcp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: lightpanda-mcp
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: lightpanda-mcp
+    spec:
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: lightpanda-mcp
+          image: ghcr.io/openstaticfish/microservices/lightpanda-mcp:main
+          ports:
+            - containerPort: 8000
+          env:
+            - name: LIGHTPANDA_DISABLE_TELEMETRY
+              value: "true"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 192Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2

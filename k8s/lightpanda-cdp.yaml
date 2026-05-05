@@ -1,0 +1,80 @@
+# --- Lightpanda CDP Kubernetes Manifests ---
+# Managed by Tilt - run `tilt up` to deploy
+# Tear down with: `tilt down`
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lightpanda-cdp-deployment
+  labels:
+    app: lightpanda-cdp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lightpanda-cdp
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: lightpanda-cdp
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: lightpanda-cdp
+          image: lightpanda/browser:nightly
+          args:
+            - /bin/lightpanda
+            - serve
+            - --host
+            - 0.0.0.0
+            - --port
+            - "9222"
+            - --log-level
+            - warn
+          ports:
+            - containerPort: 9222
+          env:
+            - name: LIGHTPANDA_DISABLE_TELEMETRY
+              value: "true"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+          livenessProbe:
+            httpGet:
+              path: /json/version
+              port: 9222
+            initialDelaySeconds: 2
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /json/version
+              port: 9222
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lightpanda-cdp-service
+spec:
+  selector:
+    app: lightpanda-cdp
+  ports:
+    - name: cdp
+      protocol: TCP
+      port: 9222
+      targetPort: 9222
+  type: ClusterIP

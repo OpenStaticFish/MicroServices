@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: lightpanda-mcp
+  namespace: microservices
+spec:
+  type: ClusterIP
+  selector:
+    app: lightpanda-mcp
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8000
+      targetPort: 8000

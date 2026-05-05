@@ -5,6 +5,12 @@ resources:
   - webshare-api-externalsecret.yaml
   - site-analyzer-deployment.yaml
   - site-analyzer-service.yaml
+  - lightpanda-cdp-deployment.yaml
+  - lightpanda-cdp-service.yaml
+  - lightpanda-cdp-hpa.yaml
+  - lightpanda-mcp-deployment.yaml
+  - lightpanda-mcp-service.yaml
+  - lightpanda-mcp-hpa.yaml
   - scraper-deployment.yaml
   - scraper-service.yaml
   - traefik-middleware-strip-prefix.yaml
@@ -13,4 +19,6 @@ images:
   - name: ghcr.io/openstaticfish/microservices/site-analyzer
     newTag: 70c2dd4b32bf0b111e5ae5388d0380e04a764c51
   - name: ghcr.io/openstaticfish/microservices/scraper
+    newTag: 70c2dd4b32bf0b111e5ae5388d0380e04a764c51
+  - name: ghcr.io/openstaticfish/microservices/lightpanda-mcp
     newTag: 70c2dd4b32bf0b111e5ae5388d0380e04a764c51

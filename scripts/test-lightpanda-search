@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MCP_URL="${MCP_URL:-http://localhost:8000/mcp}"
+CONCURRENT=1
+QUERY="chattybox ai"
+MAX_RESULTS=5
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/test-lightpanda-search [options]
+
+Test Lightpanda MCP by searching Google and extracting top results.
+
+Options:
+  -c, --concurrent N    Number of concurrent searches (default: 1, max: 10)
+  -q, --query TEXT      Search query (default: "chattybox ai")
+  -r, --results N       Number of results to return per worker (default: 5)
+  -h, --help            Show this help message
+
+Examples:
+  scripts/test-lightpanda-search
+  scripts/test-lightpanda-search --concurrent 5
+  scripts/test-lightpanda-search --query "kubernetes helm" --results 3 --concurrent 5
+USAGE
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -c|--concurrent)
+      if [ "$#" -lt 2 ]; then
+        echo "Missing value for $1" >&2
+        usage >&2
+        exit 1
+      fi
+      CONCURRENT="$2"
+      shift 2
+      ;;
+    -q|--query)
+      if [ "$#" -lt 2 ]; then
+        echo "Missing value for $1" >&2
+        usage >&2
+        exit 1
+      fi
+      QUERY="$2"
+      shift 2
+      ;;
+    -r|--results)
+      if [ "$#" -lt 2 ]; then
+        echo "Missing value for $1" >&2
+        usage >&2
+        exit 1
+      fi
+      MAX_RESULTS="$2"
+      shift 2
+      ;;
+    --*)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [ "$CONCURRENT" -lt 1 ]; then CONCURRENT=1; fi
+if [ "$CONCURRENT" -gt 10 ]; then CONCURRENT=10; fi
+
+ENCODED_QUERY=$(jq -rn --arg q "$QUERY" '$q|@uri')
+SEARCH_URL="https://www.bing.com/search?q=$ENCODED_QUERY"
+
+health_url="${MCP_URL%/mcp}"
+if [ -z "$health_url" ]; then health_url="http://localhost:8000"; fi
+if ! curl -sf "$health_url/healthz" >/dev/null 2>&1; then
+  echo "ERROR: Lightpanda MCP not reachable at $health_url" >&2
+  echo "Make sure Tilt is running: nix run .#tilt -- up" >&2
+  exit 1
+fi
+
+# Extract JSON from SSE response body
+extract_json_from_sse() {
+  sed -n 's/^data: //p'
+}
+
+# Extract session ID from response headers file
+extract_session_id() {
+  local headers_file="$1"
+  grep -i '^Mcp-Session-Id:' "$headers_file" 2>/dev/null | awk '{print $2}' | tr -d '\r' || true
+}
+
+search_worker() {
+  local worker_id="$1"
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local headers_file="$tmpdir/headers.txt"
+
+  echo "[$worker_id] Searching for: $QUERY"
+
+  # Initialize session
+  local init_payload
+  init_payload=$(jq -n \
+    --argjson id "$worker_id" \
+    '{
+      jsonrpc: "2.0",
+      id: $id,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: {
+          name: "search-test-\($id)",
+          version: "1.0"
+        }
+      }
+    }')
+
+  local init_response
+  init_response=$(curl -sf -X POST "$MCP_URL" \
+    -D "$headers_file" \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -d "$init_payload" 2>"$tmpdir/curl.err") || {
+    echo "[$worker_id] ERROR: Initialize failed" >&2
+    cat "$tmpdir/curl.err" >&2
+    rm -rf "$tmpdir"
+    return 1
+  }
+
+  local session_id
+  session_id=$(extract_session_id "$headers_file")
+
+  if [ -z "$session_id" ]; then
+    echo "[$worker_id] ERROR: No session ID received" >&2
+    rm -rf "$tmpdir"
+    return 1
+  fi
+
+  # Navigate to search page
+  local goto_payload
+  goto_payload=$(jq -n \
+    --argjson id "$((worker_id + 100))" \
+    --arg url "$SEARCH_URL" \
+    '{
+      jsonrpc: "2.0",
+      id: $id,
+      method: "tools/call",
+      params: {
+        name: "goto",
+        arguments: {
+          url: $url
+        }
+      }
+    }')
+
+  curl -sf -X POST "$MCP_URL" \
+    -H "Mcp-Session-Id: $session_id" \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -d "$goto_payload" >/dev/null 2>"$tmpdir/goto.err" || {
+    echo "[$worker_id] WARNING: Goto may have issues" >&2
+    cat "$tmpdir/goto.err" >&2
+  }
+
+  sleep 2
+
+  # Extract results
+  local js_file="$tmpdir/extract.js"
+  cat > "$js_file" <<'JSEOF'
+(() => {
+  function decodeBingUrl(href) {
+    try {
+      const url = new URL(href);
+      const encoded = url.searchParams.get('u');
+      if (!encoded || !encoded.startsWith('a1')) return href;
+      const base64 = encoded.slice(2).replace(/-/g, '+').replace(/_/g, '/');
+      const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, '=');
+      return atob(padded);
+    } catch (_) {
+      return href;
+    }
+  }
+
+  const results = [];
+  const links = Array.from(document.querySelectorAll('li.b_algo h2 a[href]'));
+  for (const a of links) {
+    if (results.length >= 5) break;
+    const title = a.textContent.replace(/\s+/g, ' ').trim();
+    const href = decodeBingUrl(a.href);
+    if (title.length < 3) continue;
+    if (!href.startsWith('http')) continue;
+    results.push({title, url: href});
+  }
+  return JSON.stringify({
+    url: location.href,
+    title: document.title,
+    resultCount: results.length,
+    results,
+  });
+})()
+JSEOF
+
+  local js
+  js=$(tr '\n' ' ' < "$js_file")
+
+  local eval_payload
+  eval_payload=$(jq -n \
+    --argjson id "$((worker_id + 200))" \
+    --arg script "$js" \
+    '{
+      jsonrpc: "2.0",
+      id: $id,
+      method: "tools/call",
+      params: {
+        name: "evaluate",
+        arguments: {
+          script: $script
+        }
+      }
+    }')
+
+  local eval_response
+  eval_response=$(curl -sf -X POST "$MCP_URL" \
+    -H "Mcp-Session-Id: $session_id" \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -d "$eval_payload" 2>"$tmpdir/eval.err") || {
+    echo "[$worker_id] ERROR: Evaluate failed" >&2
+    cat "$tmpdir/eval.err" >&2
+    rm -rf "$tmpdir"
+    return 1
+  }
+
+  local result_text
+  result_text=$(printf '%s\n' "$eval_response" | extract_json_from_sse | jq -r '.result.content[0].text // empty' 2>/dev/null)
+
+  echo "[$worker_id] Results:"
+  if [ -n "$result_text" ]; then
+    local result_count
+    result_count=$(printf '%s\n' "$result_text" | jq -r '.resultCount // 0' 2>/dev/null || printf '0')
+    if [ "$result_count" -gt 0 ]; then
+      printf '%s\n' "$result_text" | jq -r --argjson max "$MAX_RESULTS" '.results[:$max] | .[] | "  \(.title)\n    \(.url)\n"' 2>/dev/null || printf '  Raw: %s\n' "$result_text"
+    else
+      echo "  (No search results found)"
+      printf '%s\n' "$result_text" | jq -r '"  Page: \(.title) at \(.url)"' 2>/dev/null || printf '  Raw: %s\n' "$result_text"
+      rm -rf "$tmpdir"
+      return 1
+    fi
+  else
+    echo "  (No results found)"
+    local parsed
+    parsed=$(printf '%s\n' "$eval_response" | extract_json_from_sse | jq . 2>/dev/null)
+    if [ -n "$parsed" ]; then
+      printf '  Response: %s\n' "$parsed"
+    else
+      printf '  Raw response:\n%s\n' "$eval_response"
+    fi
+  fi
+
+  rm -rf "$tmpdir"
+  echo "[$worker_id] Done"
+}
+
+echo "=== Lightpanda Search Test ==="
+echo "Query: $QUERY"
+echo "URL: $SEARCH_URL"
+echo "Workers: $CONCURRENT"
+echo "Results per worker: $MAX_RESULTS"
+echo ""
+
+pids=()
+for i in $(seq 1 "$CONCURRENT"); do
+  search_worker "$i" &
+  pids+=("$!")
+  sleep 0.5
+done
+
+for pid in "${pids[@]}"; do
+  wait "$pid" || true
+done
+
+echo ""
+echo "=== All workers completed ==="

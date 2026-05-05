@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -46,6 +48,8 @@ type ErrorResponse struct {
 
 const webshareProxyCacheTTL = 5 * time.Minute
 
+var metricsState = newMetricsState()
+
 type webshareProxy struct {
 	Username         string `json:"username"`
 	Password         string `json:"password"`
@@ -75,11 +79,109 @@ func main() {
 		port = "8080"
 	}
 
-	http.HandleFunc("/scrape", handleScrape)
-	http.HandleFunc("/health", handleHealth)
+	http.Handle("/scrape", instrumentHandler("/scrape", http.HandlerFunc(handleScrape)))
+	http.Handle("/health", instrumentHandler("/health", http.HandlerFunc(handleHealth)))
+	http.HandleFunc("/ready", handleHealth)
+	http.HandleFunc("/metrics", handleMetrics)
 
 	log.Printf("scraper listening on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))
+}
+
+type metricsStateData struct {
+	startedAt        time.Time
+	inFlight         atomic.Int64
+	proxyErrorsTotal atomic.Int64
+	mu               sync.Mutex
+	httpRequests     map[string]int64
+	httpErrors       map[string]int64
+	httpDuration     map[string]*histogram
+	scraperJobs      map[string]int64
+	scraperDuration  map[string]*histogram
+}
+
+type histogram struct {
+	buckets []float64
+	counts  []int64
+	sum     float64
+	count   int64
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func newMetricsState() *metricsStateData {
+	return &metricsStateData{
+		startedAt:       time.Now(),
+		httpRequests:    map[string]int64{},
+		httpErrors:      map[string]int64{},
+		httpDuration:    map[string]*histogram{},
+		scraperJobs:     map[string]int64{},
+		scraperDuration: map[string]*histogram{},
+	}
+}
+
+func newHistogram() *histogram {
+	buckets := []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30}
+	return &histogram{buckets: buckets, counts: make([]int64, len(buckets))}
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func instrumentHandler(path string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		metricsState.inFlight.Add(1)
+		defer metricsState.inFlight.Add(-1)
+
+		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(recorder, r)
+		metricsState.recordHTTP(r.Method, path, recorder.status, time.Since(start).Seconds())
+	})
+}
+
+func (m *metricsStateData) recordHTTP(method string, path string, status int, seconds float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	statusCode := fmt.Sprintf("%d", status)
+	key := method + "|" + path + "|" + statusCode
+	m.httpRequests[key]++
+	if status >= 500 {
+		m.httpErrors[key]++
+	}
+	histogramKey := method + "|" + path
+	m.histogram(m.httpDuration, histogramKey).observe(seconds)
+}
+
+func (m *metricsStateData) recordScrape(result string, seconds float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.scraperJobs[result]++
+	m.histogram(m.scraperDuration, result).observe(seconds)
+}
+
+func (m *metricsStateData) histogram(histograms map[string]*histogram, key string) *histogram {
+	h, ok := histograms[key]
+	if !ok {
+		h = newHistogram()
+		histograms[key] = h
+	}
+	return h
+}
+
+func (h *histogram) observe(seconds float64) {
+	h.count++
+	h.sum += seconds
+	for i, bucket := range h.buckets {
+		if seconds <= bucket {
+			h.counts[i]++
+		}
+	}
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -87,19 +189,108 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, "ok")
 }
 
+func handleMetrics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	metricsState.writePrometheus(w)
+}
+
+func (m *metricsStateData) writePrometheus(w io.Writer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var runtimeStats runtime.MemStats
+	runtime.ReadMemStats(&runtimeStats)
+
+	fmt.Fprintf(w, "# HELP http_requests_total Total HTTP requests by method, path, and status.\n")
+	fmt.Fprintf(w, "# TYPE http_requests_total counter\n")
+	for key, count := range m.httpRequests {
+		method, path, status := splitMetricKey(key)
+		fmt.Fprintf(w, "http_requests_total{service=\"scraper\",method=\"%s\",path=\"%s\",status=\"%s\"} %d\n", method, path, status, count)
+	}
+
+	fmt.Fprintf(w, "# HELP http_errors_total Total HTTP 5xx responses by method, path, and status.\n")
+	fmt.Fprintf(w, "# TYPE http_errors_total counter\n")
+	for key, count := range m.httpErrors {
+		method, path, status := splitMetricKey(key)
+		fmt.Fprintf(w, "http_errors_total{service=\"scraper\",method=\"%s\",path=\"%s\",status=\"%s\"} %d\n", method, path, status, count)
+	}
+
+	fmt.Fprintf(w, "# HELP http_requests_in_flight Current in-flight HTTP requests.\n")
+	fmt.Fprintf(w, "# TYPE http_requests_in_flight gauge\n")
+	fmt.Fprintf(w, "http_requests_in_flight{service=\"scraper\"} %d\n", m.inFlight.Load())
+
+	fmt.Fprintf(w, "# HELP http_request_duration_seconds HTTP request duration by method and path.\n")
+	fmt.Fprintf(w, "# TYPE http_request_duration_seconds histogram\n")
+	for key, histogram := range m.httpDuration {
+		method, path, _ := splitMetricKey(key)
+		writeHistogram(w, "http_request_duration_seconds", fmt.Sprintf("service=\"scraper\",method=\"%s\",path=\"%s\"", method, path), histogram)
+	}
+
+	fmt.Fprintf(w, "# HELP scraper_jobs_total Total scrape jobs by result.\n")
+	fmt.Fprintf(w, "# TYPE scraper_jobs_total counter\n")
+	for result, count := range m.scraperJobs {
+		fmt.Fprintf(w, "scraper_jobs_total{result=\"%s\"} %d\n", result, count)
+	}
+
+	fmt.Fprintf(w, "# HELP scraper_job_duration_seconds Scrape job duration by result.\n")
+	fmt.Fprintf(w, "# TYPE scraper_job_duration_seconds histogram\n")
+	for result, histogram := range m.scraperDuration {
+		writeHistogram(w, "scraper_job_duration_seconds", fmt.Sprintf("result=\"%s\"", result), histogram)
+	}
+
+	fmt.Fprintf(w, "# HELP scraper_proxy_errors_total Total Webshare proxy selection/configuration errors.\n")
+	fmt.Fprintf(w, "# TYPE scraper_proxy_errors_total counter\n")
+	fmt.Fprintf(w, "scraper_proxy_errors_total %d\n", m.proxyErrorsTotal.Load())
+	fmt.Fprintf(w, "# HELP process_start_time_seconds Start time of the process since unix epoch in seconds.\n")
+	fmt.Fprintf(w, "# TYPE process_start_time_seconds gauge\n")
+	fmt.Fprintf(w, "process_start_time_seconds %.0f\n", float64(m.startedAt.Unix()))
+	fmt.Fprintf(w, "# HELP go_goroutines Number of goroutines that currently exist.\n")
+	fmt.Fprintf(w, "# TYPE go_goroutines gauge\n")
+	fmt.Fprintf(w, "go_goroutines %d\n", runtime.NumGoroutine())
+	fmt.Fprintf(w, "# HELP go_memstats_alloc_bytes Number of bytes allocated and still in use.\n")
+	fmt.Fprintf(w, "# TYPE go_memstats_alloc_bytes gauge\n")
+	fmt.Fprintf(w, "go_memstats_alloc_bytes %d\n", runtimeStats.Alloc)
+}
+
+func writeHistogram(w io.Writer, name string, labels string, histogram *histogram) {
+	for i, bucket := range histogram.buckets {
+		fmt.Fprintf(w, "%s_bucket{%s,le=\"%g\"} %d\n", name, labels, bucket, histogram.counts[i])
+	}
+	fmt.Fprintf(w, "%s_bucket{%s,le=\"+Inf\"} %d\n", name, labels, histogram.count)
+	fmt.Fprintf(w, "%s_sum{%s} %.6f\n", name, labels, histogram.sum)
+	fmt.Fprintf(w, "%s_count{%s} %d\n", name, labels, histogram.count)
+}
+
+func splitMetricKey(key string) (string, string, string) {
+	parts := strings.Split(key, "|")
+	for len(parts) < 3 {
+		parts = append(parts, "")
+	}
+	return parts[0], parts[1], parts[2]
+}
+
 func handleScrape(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	result := "success"
+	defer func() {
+		metricsState.recordScrape(result, time.Since(start).Seconds())
+	}()
+
 	if r.Method != http.MethodPost {
+		result = "error"
 		respondWithError(w, http.StatusMethodNotAllowed, "Method not allowed", "Only POST requests are supported")
 		return
 	}
 
 	var req ScrapeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		result = "error"
 		respondWithError(w, http.StatusBadRequest, "Invalid JSON", err.Error())
 		return
 	}
 
 	if req.URL == "" {
+		result = "error"
 		respondWithError(w, http.StatusBadRequest, "Missing URL", "url field is required")
 		return
 	}
@@ -109,29 +300,32 @@ func handleScrape(w http.ResponseWriter, r *http.Request) {
 		format = "json"
 	}
 	if format != "md" && format != "json" {
+		result = "error"
 		respondWithError(w, http.StatusBadRequest, "Invalid format", "format must be 'md' or 'json'")
 		return
 	}
 
 	country := normalizeCountryCode(req.Country)
 	if err := validateCountry(country); err != nil {
+		result = "error"
 		respondWithError(w, http.StatusBadRequest, "Invalid country", err.Error())
 		return
 	}
 
 	req.URL = normalizeURL(req.URL)
-	result, err := scrapeURL(req.URL, format, country)
+	scrapeResult, err := scrapeURL(req.URL, format, country)
 	if err != nil {
+		result = "error"
 		respondWithError(w, http.StatusInternalServerError, "Scraping failed", err.Error())
 		return
 	}
 
 	if format == "md" {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprint(w, result.Content)
+		fmt.Fprint(w, scrapeResult.Content)
 	} else {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(result)
+		json.NewEncoder(w).Encode(scrapeResult)
 	}
 }
 
@@ -139,10 +333,12 @@ func scrapeURL(url, format string, country string) (*ScrapeResponse, error) {
 	if country != "" {
 		proxy, err := selectWebshareProxy(country)
 		if err != nil {
+			metricsState.proxyErrorsTotal.Add(1)
 			return nil, err
 		}
 		transport, err := webshareProxyTransport(proxy)
 		if err != nil {
+			metricsState.proxyErrorsTotal.Add(1)
 			return nil, err
 		}
 		return scrapeURLWithTransport(url, format, country, transport)

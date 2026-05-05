@@ -1,0 +1,16 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: site-analyzer
+  namespace: microservices
+  labels:
+    app: site-analyzer
+spec:
+  selector:
+    matchLabels:
+      app: site-analyzer
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s

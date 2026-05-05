@@ -3,6 +3,8 @@ kind: Service
 metadata:
   name: lightpanda-mcp
   namespace: microservices
+  labels:
+    app: lightpanda-mcp
 spec:
   type: ClusterIP
   selector:

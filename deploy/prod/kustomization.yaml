@@ -5,6 +5,7 @@ resources:
   - webshare-api-externalsecret.yaml
   - site-analyzer-deployment.yaml
   - site-analyzer-service.yaml
+  - site-analyzer-servicemonitor.yaml
   - site-analyzer-hpa.yaml
   - lightpanda-cdp-deployment.yaml
   - lightpanda-cdp-service.yaml
@@ -14,7 +15,10 @@ resources:
   - lightpanda-mcp-hpa.yaml
   - scraper-deployment.yaml
   - scraper-service.yaml
+  - scraper-servicemonitor.yaml
   - scraper-hpa.yaml
+  - microservices-workload-prometheusrule.yaml
+  - microservices-http-prometheusrule.yaml
   - traefik-middleware-strip-prefix.yaml
   - ingressroute-microservices.yaml
 images:

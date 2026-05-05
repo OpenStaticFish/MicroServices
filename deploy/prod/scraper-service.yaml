@@ -3,6 +3,8 @@ kind: Service
 metadata:
   name: scraper
   namespace: microservices
+  labels:
+    app: scraper
 spec:
   type: ClusterIP
   selector:

@@ -12,9 +12,11 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -114,6 +116,7 @@ type app struct {
 }
 
 type metrics struct {
+	startedAt            time.Time
 	requestsTotal        atomic.Int64
 	analyzeRequestsTotal atomic.Int64
 	analyzeRejectedTotal atomic.Int64
@@ -121,6 +124,23 @@ type metrics struct {
 	analyzeDurationCount atomic.Int64
 	analyzeDurationNanos atomic.Int64
 	activeAnalyses       atomic.Int64
+	mu                   sync.Mutex
+	httpRequests         map[string]int64
+	httpErrors           map[string]int64
+	httpDuration         map[string]*histogram
+	analyzeDuration      *histogram
+}
+
+type histogram struct {
+	buckets []float64
+	counts  []int64
+	sum     float64
+	count   int64
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
 }
 
 var errUnsafeTarget = errors.New("target resolves to a private or otherwise unsafe address")
@@ -130,9 +150,9 @@ func main() {
 	application := newApp(cfg)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/analyze", application.handleAnalyze)
-	mux.HandleFunc("/health", application.handleHealth)
-	mux.HandleFunc("/ready", application.handleReady)
+	mux.Handle("/analyze", application.instrumentHandler("/analyze", http.HandlerFunc(application.handleAnalyze)))
+	mux.Handle("/health", application.instrumentHandler("/health", http.HandlerFunc(application.handleHealth)))
+	mux.Handle("/ready", application.instrumentHandler("/ready", http.HandlerFunc(application.handleReady)))
 	mux.HandleFunc("/metrics", application.handleMetrics)
 
 	server := &http.Server{
@@ -176,7 +196,7 @@ func newApp(cfg config) *app {
 	application := &app{
 		config:    cfg,
 		semaphore: make(chan struct{}, cfg.maxConcurrentAnalyses),
-		metrics:   &metrics{},
+		metrics:   newMetrics(),
 	}
 
 	transport := &http.Transport{
@@ -201,6 +221,73 @@ func newApp(cfg config) *app {
 	}
 
 	return application
+}
+
+func newMetrics() *metrics {
+	return &metrics{
+		startedAt:       time.Now(),
+		httpRequests:    map[string]int64{},
+		httpErrors:      map[string]int64{},
+		httpDuration:    map[string]*histogram{},
+		analyzeDuration: newHistogram(),
+	}
+}
+
+func newHistogram() *histogram {
+	buckets := []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30}
+	return &histogram{buckets: buckets, counts: make([]int64, len(buckets))}
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func (a *app) instrumentHandler(path string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(recorder, r)
+		a.metrics.recordHTTP(r.Method, path, recorder.status, time.Since(start).Seconds())
+	})
+}
+
+func (m *metrics) recordHTTP(method string, path string, status int, seconds float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	statusCode := fmt.Sprintf("%d", status)
+	key := method + "|" + path + "|" + statusCode
+	m.httpRequests[key]++
+	if status >= 500 {
+		m.httpErrors[key]++
+	}
+	histogramKey := method + "|" + path
+	m.histogram(m.httpDuration, histogramKey).observe(seconds)
+}
+
+func (m *metrics) recordAnalyzeDuration(seconds float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.analyzeDuration.observe(seconds)
+}
+
+func (m *metrics) histogram(histograms map[string]*histogram, key string) *histogram {
+	h, ok := histograms[key]
+	if !ok {
+		h = newHistogram()
+		histograms[key] = h
+	}
+	return h
+}
+
+func (h *histogram) observe(seconds float64) {
+	h.count++
+	h.sum += seconds
+	for i, bucket := range h.buckets {
+		if seconds <= bucket {
+			h.counts[i]++
+		}
+	}
 }
 
 func loadConfig() config {
@@ -285,32 +372,100 @@ func (a *app) handleReady(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	a.metrics.requestsTotal.Add(1)
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	a.metrics.writePrometheus(w, a.config)
+}
 
-	durationSeconds := float64(a.metrics.analyzeDurationNanos.Load()) / float64(time.Second)
+func (m *metrics) writePrometheus(w io.Writer, cfg config) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var runtimeStats runtime.MemStats
+	runtime.ReadMemStats(&runtimeStats)
+
+	durationSeconds := float64(m.analyzeDurationNanos.Load()) / float64(time.Second)
 	fmt.Fprintf(w, "# HELP site_analyzer_requests_total Total HTTP requests received.\n")
 	fmt.Fprintf(w, "# TYPE site_analyzer_requests_total counter\n")
-	fmt.Fprintf(w, "site_analyzer_requests_total %d\n", a.metrics.requestsTotal.Load())
+	fmt.Fprintf(w, "site_analyzer_requests_total %d\n", m.requestsTotal.Load())
 	fmt.Fprintf(w, "# HELP site_analyzer_analyze_requests_total Total analyze requests received.\n")
 	fmt.Fprintf(w, "# TYPE site_analyzer_analyze_requests_total counter\n")
-	fmt.Fprintf(w, "site_analyzer_analyze_requests_total %d\n", a.metrics.analyzeRequestsTotal.Load())
+	fmt.Fprintf(w, "site_analyzer_analyze_requests_total %d\n", m.analyzeRequestsTotal.Load())
 	fmt.Fprintf(w, "# HELP site_analyzer_analyze_rejected_total Analyze requests rejected because the pod is saturated.\n")
 	fmt.Fprintf(w, "# TYPE site_analyzer_analyze_rejected_total counter\n")
-	fmt.Fprintf(w, "site_analyzer_analyze_rejected_total %d\n", a.metrics.analyzeRejectedTotal.Load())
+	fmt.Fprintf(w, "site_analyzer_analyze_rejected_total %d\n", m.analyzeRejectedTotal.Load())
 	fmt.Fprintf(w, "# HELP site_analyzer_analyze_errors_total Analyze requests that failed before producing a response.\n")
 	fmt.Fprintf(w, "# TYPE site_analyzer_analyze_errors_total counter\n")
-	fmt.Fprintf(w, "site_analyzer_analyze_errors_total %d\n", a.metrics.analyzeErrorsTotal.Load())
+	fmt.Fprintf(w, "site_analyzer_analyze_errors_total %d\n", m.analyzeErrorsTotal.Load())
 	fmt.Fprintf(w, "# HELP site_analyzer_active_analyses Current number of in-flight analyses.\n")
 	fmt.Fprintf(w, "# TYPE site_analyzer_active_analyses gauge\n")
-	fmt.Fprintf(w, "site_analyzer_active_analyses %d\n", a.metrics.activeAnalyses.Load())
+	fmt.Fprintf(w, "site_analyzer_active_analyses %d\n", m.activeAnalyses.Load())
 	fmt.Fprintf(w, "# HELP site_analyzer_max_concurrent_analyses Configured maximum in-flight analyses per pod.\n")
 	fmt.Fprintf(w, "# TYPE site_analyzer_max_concurrent_analyses gauge\n")
-	fmt.Fprintf(w, "site_analyzer_max_concurrent_analyses %d\n", a.config.maxConcurrentAnalyses)
+	fmt.Fprintf(w, "site_analyzer_max_concurrent_analyses %d\n", cfg.maxConcurrentAnalyses)
 	fmt.Fprintf(w, "# HELP site_analyzer_analyze_duration_seconds Total analyze request duration.\n")
 	fmt.Fprintf(w, "# TYPE site_analyzer_analyze_duration_seconds summary\n")
 	fmt.Fprintf(w, "site_analyzer_analyze_duration_seconds_sum %.6f\n", durationSeconds)
-	fmt.Fprintf(w, "site_analyzer_analyze_duration_seconds_count %d\n", a.metrics.analyzeDurationCount.Load())
+	fmt.Fprintf(w, "site_analyzer_analyze_duration_seconds_count %d\n", m.analyzeDurationCount.Load())
+
+	fmt.Fprintf(w, "# HELP http_requests_total Total HTTP requests by method, path, and status.\n")
+	fmt.Fprintf(w, "# TYPE http_requests_total counter\n")
+	for key, count := range m.httpRequests {
+		method, path, status := splitMetricKey(key)
+		fmt.Fprintf(w, "http_requests_total{service=\"site-analyzer\",method=\"%s\",path=\"%s\",status=\"%s\"} %d\n", method, path, status, count)
+	}
+	fmt.Fprintf(w, "# HELP http_errors_total Total HTTP 5xx responses by method, path, and status.\n")
+	fmt.Fprintf(w, "# TYPE http_errors_total counter\n")
+	for key, count := range m.httpErrors {
+		method, path, status := splitMetricKey(key)
+		fmt.Fprintf(w, "http_errors_total{service=\"site-analyzer\",method=\"%s\",path=\"%s\",status=\"%s\"} %d\n", method, path, status, count)
+	}
+	fmt.Fprintf(w, "# HELP http_requests_in_flight Current in-flight HTTP analyze requests.\n")
+	fmt.Fprintf(w, "# TYPE http_requests_in_flight gauge\n")
+	fmt.Fprintf(w, "http_requests_in_flight{service=\"site-analyzer\"} %d\n", m.activeAnalyses.Load())
+	fmt.Fprintf(w, "# HELP http_request_duration_seconds HTTP request duration by method and path.\n")
+	fmt.Fprintf(w, "# TYPE http_request_duration_seconds histogram\n")
+	for key, histogram := range m.httpDuration {
+		method, path, _ := splitMetricKey(key)
+		writeHistogram(w, "http_request_duration_seconds", fmt.Sprintf("service=\"site-analyzer\",method=\"%s\",path=\"%s\"", method, path), histogram)
+	}
+	fmt.Fprintf(w, "# HELP site_analyzer_duration_seconds Analyze request duration.\n")
+	fmt.Fprintf(w, "# TYPE site_analyzer_duration_seconds histogram\n")
+	writeHistogram(w, "site_analyzer_duration_seconds", "", m.analyzeDuration)
+	fmt.Fprintf(w, "# HELP process_start_time_seconds Start time of the process since unix epoch in seconds.\n")
+	fmt.Fprintf(w, "# TYPE process_start_time_seconds gauge\n")
+	fmt.Fprintf(w, "process_start_time_seconds %.0f\n", float64(m.startedAt.Unix()))
+	fmt.Fprintf(w, "# HELP go_goroutines Number of goroutines that currently exist.\n")
+	fmt.Fprintf(w, "# TYPE go_goroutines gauge\n")
+	fmt.Fprintf(w, "go_goroutines %d\n", runtime.NumGoroutine())
+	fmt.Fprintf(w, "# HELP go_memstats_alloc_bytes Number of bytes allocated and still in use.\n")
+	fmt.Fprintf(w, "# TYPE go_memstats_alloc_bytes gauge\n")
+	fmt.Fprintf(w, "go_memstats_alloc_bytes %d\n", runtimeStats.Alloc)
+}
+
+func writeHistogram(w io.Writer, name string, labels string, histogram *histogram) {
+	labelPrefix := ""
+	if labels != "" {
+		labelPrefix = labels + ","
+	}
+	for i, bucket := range histogram.buckets {
+		fmt.Fprintf(w, "%s_bucket{%sle=\"%g\"} %d\n", name, labelPrefix, bucket, histogram.counts[i])
+	}
+	fmt.Fprintf(w, "%s_bucket{%sle=\"+Inf\"} %d\n", name, labelPrefix, histogram.count)
+	if labels == "" {
+		fmt.Fprintf(w, "%s_sum %.6f\n", name, histogram.sum)
+		fmt.Fprintf(w, "%s_count %d\n", name, histogram.count)
+		return
+	}
+	fmt.Fprintf(w, "%s_sum{%s} %.6f\n", name, labels, histogram.sum)
+	fmt.Fprintf(w, "%s_count{%s} %d\n", name, labels, histogram.count)
+}
+
+func splitMetricKey(key string) (string, string, string) {
+	parts := strings.Split(key, "|")
+	for len(parts) < 3 {
+		parts = append(parts, "")
+	}
+	return parts[0], parts[1], parts[2]
 }
 
 func (a *app) handleAnalyze(w http.ResponseWriter, r *http.Request) {
@@ -318,8 +473,10 @@ func (a *app) handleAnalyze(w http.ResponseWriter, r *http.Request) {
 	a.metrics.requestsTotal.Add(1)
 	a.metrics.analyzeRequestsTotal.Add(1)
 	defer func() {
+		duration := time.Since(start)
 		a.metrics.analyzeDurationCount.Add(1)
-		a.metrics.analyzeDurationNanos.Add(time.Since(start).Nanoseconds())
+		a.metrics.analyzeDurationNanos.Add(duration.Nanoseconds())
+		a.metrics.recordAnalyzeDuration(duration.Seconds())
 	}()
 
 	if r.Method != http.MethodPost {

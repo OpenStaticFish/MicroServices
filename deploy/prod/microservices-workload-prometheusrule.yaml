@@ -1,0 +1,27 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: microservices-workloads
+  namespace: microservices
+  labels:
+    app: microservices
+spec:
+  groups:
+    - name: microservices.workloads
+      rules:
+        - alert: MicroserviceDeploymentUnavailable
+          expr: kube_deployment_status_replicas_unavailable{namespace="microservices",deployment=~"scraper|site-analyzer|lightpanda-cdp|lightpanda-mcp"} > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Microservice deployment has unavailable replicas"
+            description: "{{ $labels.deployment }} has {{ $value }} unavailable replica(s) in namespace {{ $labels.namespace }}."
+        - alert: MicroservicePodRestarting
+          expr: increase(kube_pod_container_status_restarts_total{namespace="microservices",container=~"scraper|site-analyzer|lightpanda-cdp|lightpanda-mcp"}[15m]) > 2
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Microservice pod is restarting"
+            description: "{{ $labels.pod }}/{{ $labels.container }} restarted {{ $value }} times in the last 15 minutes."

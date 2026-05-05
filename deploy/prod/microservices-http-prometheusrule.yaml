@@ -1,0 +1,27 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: microservices-http
+  namespace: microservices
+  labels:
+    app: microservices
+spec:
+  groups:
+    - name: microservices.http
+      rules:
+        - alert: MicroserviceHigh5xxRate
+          expr: sum by (service) (rate(http_requests_total{service=~"scraper|site-analyzer",status=~"5.."}[5m])) / clamp_min(sum by (service) (rate(http_requests_total{service=~"scraper|site-analyzer"}[5m])), 0.001) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Microservice has elevated 5xx errors"
+            description: "{{ $labels.service }} has more than 5% 5xx responses over 10 minutes."
+        - alert: MicroserviceHighP95Latency
+          expr: histogram_quantile(0.95, sum by (service, le) (rate(http_request_duration_seconds_bucket{service=~"scraper|site-analyzer",path!~"/health|/ready"}[5m]))) > 2
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Microservice has high p95 latency"
+            description: "{{ $labels.service }} p95 HTTP latency is above 2 seconds over 10 minutes."

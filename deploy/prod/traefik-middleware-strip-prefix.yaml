@@ -8,3 +8,5 @@ spec:
     prefixes:
       - /site-analyzer
       - /scraper
+      - /lightpanda-cdp
+      - /lightpanda-mcp

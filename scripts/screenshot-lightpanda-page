@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CDP_URL="${CDP_URL:-http://localhost:9222}"
+QUERY="chattybox ai"
+OUTPUT="lightpanda-google-search.png"
+WAIT_SECONDS=4
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/screenshot-lightpanda-page [options]
+
+Take a screenshot with the Lightpanda CDP service.
+
+Options:
+  -q, --query TEXT      Google search query (default: "chattybox ai")
+  -u, --url URL         URL to capture instead of building a Google search URL
+  -o, --output PATH     Screenshot output path (default: lightpanda-google-search.png)
+  -w, --wait SECONDS    Seconds to wait after navigation (default: 4)
+  -h, --help            Show this help message
+
+Examples:
+  scripts/screenshot-lightpanda-page
+  scripts/screenshot-lightpanda-page --output /tmp/google-consent.png
+  scripts/screenshot-lightpanda-page --url https://example.com --output /tmp/example.png
+USAGE
+}
+
+URL=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -q|--query)
+      QUERY="$2"
+      shift 2
+      ;;
+    -u|--url)
+      URL="$2"
+      shift 2
+      ;;
+    -o|--output)
+      OUTPUT="$2"
+      shift 2
+      ;;
+    -w|--wait)
+      WAIT_SECONDS="$2"
+      shift 2
+      ;;
+    --*)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [ -z "$URL" ]; then
+  encoded_query=$(jq -rn --arg q "$QUERY" '$q|@uri')
+  URL="https://www.bing.com/search?q=$encoded_query"
+fi
+
+if ! command -v websocat >/dev/null 2>&1; then
+  echo "ERROR: websocat is required. Run through nix develop after updating the flake." >&2
+  exit 1
+fi
+
+version_json=$(curl -sf "$CDP_URL/json/version") || {
+  echo "ERROR: Lightpanda CDP not reachable at $CDP_URL" >&2
+  echo "Make sure Tilt is running: nix run .#tilt -- up" >&2
+  exit 1
+}
+
+ws_url=$(printf '%s\n' "$version_json" | jq -r '.webSocketDebuggerUrl')
+ws_url="${ws_url/0.0.0.0/localhost}"
+
+echo "Capturing: $URL"
+echo "Output: $OUTPUT"
+
+coproc CDP { websocat "$ws_url"; }
+trap 'kill "$CDP_PID" >/dev/null 2>&1 || true' EXIT
+
+send_cdp() {
+  local id="$1"
+  local method="$2"
+  local params="{}"
+  if [ "$#" -ge 3 ]; then
+    params="$3"
+  fi
+  jq -cn --argjson id "$id" --arg method "$method" --argjson params "$params" \
+    '{id: $id, method: $method, params: $params}' >&"${CDP[1]}"
+}
+
+read_cdp_id() {
+  local wanted_id="$1"
+  local line id
+  while IFS= read -r line <&"${CDP[0]}"; do
+    id=$(printf '%s\n' "$line" | jq -r '.id // empty' 2>/dev/null || true)
+    if [ "$id" = "$wanted_id" ]; then
+      printf '%s\n' "$line"
+      return 0
+    fi
+  done
+  return 1
+}
+
+send_cdp 1 "Page.enable"
+read_cdp_id 1 >/dev/null
+
+send_cdp 2 "Emulation.setDeviceMetricsOverride" '{"width":1280,"height":900,"deviceScaleFactor":1,"mobile":false}'
+read_cdp_id 2 >/dev/null
+
+navigate_params=$(jq -cn --arg url "$URL" '{url: $url}')
+send_cdp 3 "Page.navigate" "$navigate_params"
+read_cdp_id 3 >/dev/null
+
+sleep "$WAIT_SECONDS"
+
+send_cdp 4 "Page.captureScreenshot" '{"format":"png","fromSurface":true}'
+screenshot_response=$(read_cdp_id 4)
+screenshot_data=$(printf '%s\n' "$screenshot_response" | jq -r '.result.data // empty')
+
+if [ -z "$screenshot_data" ]; then
+  echo "ERROR: Screenshot response did not include image data" >&2
+  printf '%s\n' "$screenshot_response" >&2
+  exit 1
+fi
+
+printf '%s' "$screenshot_data" | base64 -d > "$OUTPUT"
+echo "Saved screenshot to $OUTPUT"

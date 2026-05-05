@@ -45,6 +45,7 @@
             # --- Utilities ---
             curl
             jq
+            websocat
             yq-go
           ];
 

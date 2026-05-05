@@ -25,6 +25,7 @@ jobs:
         service:
           - site-analyzer
           - scraper
+          - lightpanda-mcp
 
     steps:
       - name: Checkout
@@ -64,6 +65,7 @@ jobs:
           set -euo pipefail
           sed -i -E "/name: ghcr\.io\/openstaticfish\/microservices\/site-analyzer/{n;s/newTag: .*/newTag: ${GITHUB_SHA}/;}" deploy/prod/kustomization.yaml
           sed -i -E "/name: ghcr\.io\/openstaticfish\/microservices\/scraper/{n;s/newTag: .*/newTag: ${GITHUB_SHA}/;}" deploy/prod/kustomization.yaml
+          sed -i -E "/name: ghcr\.io\/openstaticfish\/microservices\/lightpanda-mcp/{n;s/newTag: .*/newTag: ${GITHUB_SHA}/;}" deploy/prod/kustomization.yaml
 
       - name: Commit production image tag update
         run: |

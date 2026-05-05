@@ -50,6 +50,13 @@ Analyze a site once Tilt is running:
 scripts/analyze-site adaptive.co.uk
 ```
 
+Check Lightpanda once Tilt is running:
+
+```bash
+curl http://localhost:9222/json/version
+curl http://localhost:8000/healthz
+```
+
 Stop Tilt resources:
 
 ```bash
@@ -262,6 +269,108 @@ The response includes:
 
 CDNs can hide the real origin. If a site is proxied through Cloudflare, the public DNS and IPs usually identify Cloudflare rather than the origin host. Origin detection is therefore best-effort and depends on leaked signals such as CSP entries, headers, HTML references, or provider-specific domains.
 
+## Lightpanda Browser
+
+The Lightpanda services provide a lightweight browser runtime for parallel automation workflows and agents.
+
+### CDP Service
+
+The `lightpanda-cdp` service runs the official `lightpanda/browser:nightly` image and exposes Lightpanda's Chrome DevTools Protocol server.
+
+Local endpoint:
+
+```text
+http://localhost:9222
+```
+
+Health/version check:
+
+```bash
+curl http://localhost:9222/json/version
+```
+
+Clients can connect with Puppeteer or another CDP-compatible client. In local Tilt, use `localhost:9222`. In production, route through:
+
+```text
+http://apps.silverside-gopher.ts.net/lightpanda-cdp
+```
+
+If a client needs the WebSocket URL directly in production, keep the `/lightpanda-cdp` prefix on the WebSocket path so Traefik can route it to the service.
+
+### MCP HTTP Service
+
+The `lightpanda-mcp` service wraps `lightpanda mcp` with `supergateway` and exposes MCP Streamable HTTP for remote agents.
+
+Local endpoint:
+
+```text
+http://localhost:8000/mcp
+```
+
+Health check:
+
+```bash
+curl http://localhost:8000/healthz
+```
+
+Example MCP initialize request:
+
+```bash
+curl -X POST http://localhost:8000/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"curl-test","version":"1.0"}}}'
+```
+
+Production endpoint:
+
+```text
+http://apps.silverside-gopher.ts.net/lightpanda-mcp/mcp
+```
+
+### Concurrent Search via MCP
+
+`scripts/test-lightpanda-search` demonstrates concurrent browser automation via the MCP endpoint. It searches Bing (Google and DuckDuckGo serve bot challenges in automated environments) and extracts organic result titles and URLs:
+
+```bash
+# Single search, 5 results
+scripts/test-lightpanda-search
+
+# 5 concurrent searches
+scripts/test-lightpanda-search --concurrent 5
+
+# Custom query
+scripts/test-lightpanda-search --query "kubernetes helm" --results 3 --concurrent 5
+```
+
+Each worker initializes a stateful MCP session, navigates to Bing, evaluates JavaScript to extract `li.b_algo h2 a` elements, and decodes Bing redirect URLs to their real destinations.
+
+### CDP Screenshot
+
+`scripts/screenshot-lightpanda-page` captures a PNG via the CDP WebSocket endpoint. Lightpanda has no graphical rendering engine, so CDP screenshots return a blank canvas. For real visual screenshots, run a graphical headless Chrome service such as `browserless/chrome`:
+
+```bash
+# Bing search (Lightpanda CDP — no visual output)
+scripts/screenshot-lightpanda-page
+
+# Custom query
+scripts/screenshot-lightpanda-page --query "kubernetes helm"
+
+# Custom URL
+scripts/screenshot-lightpanda-page --url https://example.com --output /tmp/example.png
+```
+
+### Scaling
+
+Local Tilt starts one pod of each Lightpanda service. Scale manually in Kind when testing parallel workflows:
+
+```bash
+kubectl scale deployment/lightpanda-cdp-deployment --replicas=3
+kubectl scale deployment/lightpanda-mcp-deployment --replicas=3
+```
+
+Production manifests start two replicas of each Lightpanda service and include HPAs that can scale each deployment up to ten pods based on CPU utilization.
+
 ## Secrets
 
 Runtime secrets are managed with Doppler in the `openstaticfish-microservices` project using the `dev` config.
@@ -293,6 +402,8 @@ On pushes to `main`, GitHub Actions builds and pushes these GHCR images:
 - `ghcr.io/openstaticfish/microservices/site-analyzer:<git-sha>`
 - `ghcr.io/openstaticfish/microservices/scraper:main`
 - `ghcr.io/openstaticfish/microservices/scraper:<git-sha>`
+- `ghcr.io/openstaticfish/microservices/lightpanda-mcp:main`
+- `ghcr.io/openstaticfish/microservices/lightpanda-mcp:<git-sha>`
 
 After pushing images, CI updates `deploy/prod/kustomization.yaml` to the immutable `<git-sha>` tag and commits that change back to `main`. Flux then applies the production manifests from this repo.
 
@@ -308,19 +419,29 @@ Runtime secrets, including the scraper Webshare configuration, stay in Doppler p
 ├── deploy/
 │   └── prod/
 │       ├── kustomization.yaml
+│       ├── lightpanda-cdp-deployment.yaml
+│       ├── lightpanda-mcp-deployment.yaml
 │       ├── scraper-deployment.yaml
 │       └── site-analyzer-deployment.yaml
 ├── k8s/
+│   ├── lightpanda-cdp.yaml
+│   ├── lightpanda-mcp.yaml
 │   ├── scraper.yaml
 │   └── site-analyzer.yaml
 ├── scripts/
 │   ├── analyze-site
-│   └── setup-kind
+│   ├── apply-webshare-secret
+│   ├── load-test-site-analyzer
+│   ├── screenshot-lightpanda-page
+│   ├── setup-kind
+│   └── test-lightpanda-search
 └── services/
     ├── scraper/
     │   ├── Dockerfile
     │   ├── go.mod
     │   └── main.go
+    ├── lightpanda-mcp/
+    │   └── Dockerfile
     └── site-analyzer/
         ├── Dockerfile
         ├── go.mod

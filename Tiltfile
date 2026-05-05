@@ -23,13 +23,16 @@ allow_k8s_contexts('kind-openstaticfish')
 # Builds the Docker image and deploys the manifest with live reload
 docker_build('scraper', './services/scraper')
 docker_build('site-analyzer', './services/site-analyzer')
+docker_build('lightpanda-mcp', './services/lightpanda-mcp')
 
 k8s_yaml('./k8s/scraper.yaml')
 k8s_yaml('./k8s/site-analyzer.yaml')
+k8s_yaml('./k8s/lightpanda-cdp.yaml')
+k8s_yaml('./k8s/lightpanda-mcp.yaml')
 
 local_resource(
     'webshare-secret',
-    cmd='doppler run -- bash ./scripts/apply-webshare-secret',
+    cmd='bash ./scripts/apply-webshare-secret',
     labels=['utility'],
 )
 
@@ -47,6 +50,18 @@ k8s_resource(
     labels=['site-analyzer'],
 )
 
+k8s_resource(
+    workload='lightpanda-cdp-deployment',
+    port_forwards='9222:9222',
+    labels=['lightpanda'],
+)
+
+k8s_resource(
+    workload='lightpanda-mcp-deployment',
+    port_forwards='8000:8000',
+    labels=['lightpanda'],
+)
+
 # --- Local Resources ---
 # Run a simple health check as a local resource
 local_resource(
@@ -60,5 +75,19 @@ local_resource(
     'site-analyzer-health-check',
     cmd='curl -sf http://localhost:8090/health || echo "Site analyzer not ready"',
     resource_deps=['site-analyzer-deployment'],
+    labels=['utility'],
+)
+
+local_resource(
+    'lightpanda-cdp-health-check',
+    cmd='curl -sf http://localhost:9222/json/version || echo "Lightpanda CDP not ready"',
+    resource_deps=['lightpanda-cdp-deployment'],
+    labels=['utility'],
+)
+
+local_resource(
+    'lightpanda-mcp-health-check',
+    cmd='curl -sf http://localhost:8000/healthz || echo "Lightpanda MCP not ready"',
+    resource_deps=['lightpanda-mcp-deployment'],
     labels=['utility'],
 )

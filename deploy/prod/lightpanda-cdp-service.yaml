@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: lightpanda-cdp
+  namespace: microservices
+spec:
+  type: ClusterIP
+  selector:
+    app: lightpanda-cdp
+  ports:
+    - name: cdp
+      protocol: TCP
+      port: 9222
+      targetPort: 9222

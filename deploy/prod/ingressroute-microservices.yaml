@@ -21,3 +21,22 @@ spec:
       services:
         - name: scraper
           port: 8080
+    - match: Host(`apps.silverside-gopher.ts.net`) && PathPrefix(`/lightpanda-cdp`)
+      kind: Rule
+      middlewares:
+        - name: microservices-strip-prefix
+      services:
+        - name: lightpanda-cdp
+          port: 9222
+    - match: Host(`apps.silverside-gopher.ts.net`) && PathPrefix(`/lightpanda-mcp`)
+      kind: Rule
+      middlewares:
+        - name: microservices-strip-prefix
+      services:
+        - name: lightpanda-mcp
+          port: 8000
+          sticky:
+            cookie:
+              name: lightpanda_mcp_pod
+              httpOnly: true
+              sameSite: lax

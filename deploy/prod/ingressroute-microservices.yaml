@@ -1,0 +1,23 @@
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: microservices
+  namespace: microservices
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`apps.silverside-gopher.ts.net`) && PathPrefix(`/site-analyzer`)
+      kind: Rule
+      middlewares:
+        - name: microservices-strip-prefix
+      services:
+        - name: site-analyzer
+          port: 8090
+    - match: Host(`apps.silverside-gopher.ts.net`) && PathPrefix(`/scraper`)
+      kind: Rule
+      middlewares:
+        - name: microservices-strip-prefix
+      services:
+        - name: scraper
+          port: 8080

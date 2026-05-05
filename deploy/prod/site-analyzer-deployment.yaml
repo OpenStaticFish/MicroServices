@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: site-analyzer
+  namespace: microservices
+  labels:
+    app: site-analyzer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: site-analyzer
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: site-analyzer
+    spec:
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: site-analyzer
+          image: ghcr.io/openstaticfish/microservices/site-analyzer:4c6b1dc752feab5ef4c52f40d5c97a85ec59bcba
+          ports:
+            - containerPort: 8090
+          env:
+            - name: PORT
+              value: "8090"
+            - name: MAX_CONCURRENT_ANALYSES
+              value: "20"
+            - name: ANALYSIS_TIMEOUT
+              value: 15s
+            - name: FETCH_TIMEOUT
+              value: 10s
+            - name: MAX_REQUEST_BYTES
+              value: "4096"
+            - name: MAX_RESPONSE_BYTES
+              value: "2097152"
+            - name: READ_HEADER_TIMEOUT
+              value: 2s
+            - name: READ_TIMEOUT
+              value: 5s
+            - name: WRITE_TIMEOUT
+              value: 20s
+            - name: IDLE_TIMEOUT
+              value: 60s
+            - name: SHUTDOWN_TIMEOUT
+              value: 25s
+            - name: MAX_IDLE_CONNS
+              value: "200"
+            - name: MAX_IDLE_CONNS_PER_HOST
+              value: "20"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8090
+            initialDelaySeconds: 2
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8090
+            initialDelaySeconds: 2
+            periodSeconds: 3
+            timeoutSeconds: 1
+            failureThreshold: 2

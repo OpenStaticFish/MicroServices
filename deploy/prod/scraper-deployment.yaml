@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scraper
+  namespace: microservices
+  labels:
+    app: scraper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scraper
+  template:
+    metadata:
+      labels:
+        app: scraper
+    spec:
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      containers:
+        - name: scraper
+          image: ghcr.io/openstaticfish/microservices/scraper:4c6b1dc752feab5ef4c52f40d5c97a85ec59bcba
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: WEBSHARE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: webshare-api
+                  key: api-key
+                  optional: true
+            - name: WEBSHARE_PROXY_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: webshare-api
+                  key: proxy-username
+                  optional: true
+            - name: WEBSHARE_PROXY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: webshare-api
+                  key: proxy-password
+                  optional: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5

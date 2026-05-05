@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - webshare-api-externalsecret.yaml
+  - site-analyzer-deployment.yaml
+  - site-analyzer-service.yaml
+  - scraper-deployment.yaml
+  - scraper-service.yaml
+  - traefik-middleware-strip-prefix.yaml
+  - ingressroute-microservices.yaml
+images:
+  - name: ghcr.io/openstaticfish/microservices/site-analyzer
+    newTag: 4c6b1dc752feab5ef4c52f40d5c97a85ec59bcba
+  - name: ghcr.io/openstaticfish/microservices/scraper
+    newTag: 4c6b1dc752feab5ef4c52f40d5c97a85ec59bcba

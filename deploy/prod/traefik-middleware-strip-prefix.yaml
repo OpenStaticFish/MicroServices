@@ -1,0 +1,10 @@
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: microservices-strip-prefix
+  namespace: microservices
+spec:
+  stripPrefix:
+    prefixes:
+      - /site-analyzer
+      - /scraper

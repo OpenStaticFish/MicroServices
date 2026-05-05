@@ -281,11 +281,11 @@ doppler run -- your-command
 
 Tilt uses Doppler to create the local Kubernetes `webshare-api` secret for the scraper service. Do not commit local `.env` files; `.env` and `.env.*` are ignored by Git.
 
-## Production Images
+## Production Deployment
 
 Tilt is local-development only in this repo. It continues to build local images named `site-analyzer` and `scraper` for the Kind/Tilt workflow.
 
-Production deployment is owned by the HetznerTerra GitOps repo. This repo publishes container images only; it is not the source of truth for production Kubernetes deployment manifests.
+Production Kubernetes manifests live in `deploy/prod` in this repo. HetznerTerra owns the cluster and subscribes Flux to this repository; adding or changing MicroServices workloads should happen here, not in the infrastructure repo.
 
 On pushes to `main`, GitHub Actions builds and pushes these GHCR images:
 
@@ -294,7 +294,9 @@ On pushes to `main`, GitHub Actions builds and pushes these GHCR images:
 - `ghcr.io/openstaticfish/microservices/scraper:main`
 - `ghcr.io/openstaticfish/microservices/scraper:<git-sha>`
 
-HetznerTerra should reference immutable `<git-sha>` tags for production deployments. Runtime secrets, including the scraper Webshare configuration, must be supplied by the deployment environment and are not baked into images.
+After pushing images, CI updates `deploy/prod/kustomization.yaml` to the immutable `<git-sha>` tag and commits that change back to `main`. Flux then applies the production manifests from this repo.
+
+Runtime secrets, including the scraper Webshare configuration, stay in Doppler project `openstaticfish-microservices` config `dev`. They are exposed to the cluster through External Secrets and are not baked into images or stored in HetznerTerra.
 
 ## Layout
 
@@ -303,6 +305,11 @@ HetznerTerra should reference immutable `<git-sha>` tags for production deployme
 ├── flake.nix
 ├── doppler.yaml
 ├── Tiltfile
+├── deploy/
+│   └── prod/
+│       ├── kustomization.yaml
+│       ├── scraper-deployment.yaml
+│       └── site-analyzer-deployment.yaml
 ├── k8s/
 │   ├── scraper.yaml
 │   └── site-analyzer.yaml

@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+endpoint="${SCRAPER_ENDPOINT:-http://apps.silverside-gopher.ts.net/scraper/scrape}"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/test-scraper-prod [--endpoint URL] <url> [md|json] [country]
+
+Arguments:
+  url      The URL to scrape.
+  format   Output format: md or json. Defaults to json.
+  country  Optional Webshare proxy country code, for example us, gb, nl, pl.
+
+Examples:
+  scripts/test-scraper-prod https://example.com
+  scripts/test-scraper-prod https://example.com md gb
+  scripts/test-scraper-prod --endpoint http://apps.silverside-gopher.ts.net/scraper/scrape https://example.com
+  SCRAPER_ENDPOINT=http://apps.silverside-gopher.ts.net/scraper/scrape scripts/test-scraper-prod https://example.com
+USAGE
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --endpoint)
+      if [ "$#" -lt 2 ]; then
+        echo "Missing value for --endpoint" >&2
+        usage >&2
+        exit 1
+      fi
+      endpoint="$2"
+      shift 2
+      ;;
+    --endpoint=*)
+      endpoint="${1#--endpoint=}"
+      shift
+      ;;
+    --*)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+scrape_url="${1:-}"
+format="${2:-json}"
+country="${3:-}"
+
+if [ -z "$scrape_url" ]; then
+  echo "Error: URL is required" >&2
+  usage >&2
+  exit 1
+fi
+
+if [ "$format" != "md" ] && [ "$format" != "json" ]; then
+  echo "Error: format must be 'md' or 'json'" >&2
+  exit 1
+fi
+
+if [ -n "$country" ]; then
+  payload=$(jq -cn --arg url "$scrape_url" --arg format "$format" --arg country "$country" '{url: $url, format: $format, country: $country}' 2>/dev/null || printf '{"url":"%s","format":"%s","country":"%s"}' "$scrape_url" "$format" "$country")
+else
+  payload=$(jq -cn --arg url "$scrape_url" --arg format "$format" '{url: $url, format: $format}' 2>/dev/null || printf '{"url":"%s","format":"%s"}' "$scrape_url" "$format")
+fi
+
+response=$(curl -sS \
+  -H 'Content-Type: application/json' \
+  -X POST \
+  --data "$payload" \
+  "$endpoint")
+
+if [ "$format" = "md" ]; then
+  printf '%s\n' "$response"
+elif command -v jq >/dev/null 2>&1; then
+  jq . <<<"$response"
+else
+  printf '%s\n' "$response"
+fi
